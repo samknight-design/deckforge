@@ -11,7 +11,8 @@ export default function LoginPage() {
   const [error, setError] = useState('');
 
   const supabase = createClient();
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || window?.location?.origin || 'http://localhost:3000';
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ||
+    (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
 
   const handleGoogle = async () => {
     setGoogleLoading(true);
