@@ -11,7 +11,7 @@ export default async function AppLayout({ children }) {
   }
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden" style={{ background: '#0a0e1a' }}>
+    <div className="flex flex-col overflow-hidden" style={{ background: '#0a0e1a', height: '100dvh' }}>
       <main className="flex-1 overflow-hidden relative">
         {children}
       </main>

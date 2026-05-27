@@ -1,14 +1,17 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Live Scan', 'Photo', 'Search'];
+const NEW_DECK = '__new__';
 
-export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
-  const [mode, setMode] = useState('Live Scan');
-  const [activeDeckId, setActiveDeckId] = useState(decks[0]?.id || null);
+export default function Scanner({ decks: initialDecks, tier, scanCount: initialScanCount, initialMode = 'Live Scan', initialDeckId, userId }) {
+  const [mode, setMode] = useState(initialMode);
+  const [decks, setDecks] = useState(initialDecks);
+  const [activeDeckId, setActiveDeckId] = useState(initialDeckId || initialDecks[0]?.id || NEW_DECK);
   const [result, setResult] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [scanCount, setScanCount] = useState(initialScanCount);
@@ -19,15 +22,22 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
   const [cameraError, setCameraError] = useState('');
   const [isOnline, setIsOnline] = useState(true);
   const [cooldown, setCooldown] = useState(false);
+  // New deck creation inline
+  const [showNewDeckForm, setShowNewDeckForm] = useState(false);
+  const [newDeckName, setNewDeckName] = useState('');
+  const [newDeckFormat, setNewDeckFormat] = useState('commander');
+  const [creatingDeck, setCreatingDeck] = useState(false);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const canvasRef = useRef(null);
   const scanIntervalRef = useRef(null);
   const supabase = createClient();
+  const router = useRouter();
 
   const scanLimit = tier === 'pro' ? Infinity : 100;
   const activeDeck = decks.find((d) => d.id === activeDeckId);
+  const isNewDeck = activeDeckId === NEW_DECK;
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -52,8 +62,8 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
         videoRef.current.srcObject = stream;
         videoRef.current.play();
       }
-    } catch (err) {
-      setCameraError('Camera access denied. Please allow camera permissions.');
+    } catch {
+      setCameraError('Camera access denied. Please allow camera permissions in your browser settings.');
     }
   }, []);
 
@@ -83,26 +93,18 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
     const canvas = canvasRef.current;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
-    return new Promise((resolve) => {
-      canvas.toBlob(resolve, 'image/jpeg', 0.85);
-    });
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
   }, []);
 
   const submitScan = useCallback(async (blob) => {
-    if (!blob || scanning || cooldown) return;
-    if (scanCount >= scanLimit) return;
-
+    if (!blob || scanning || cooldown || scanCount >= scanLimit) return;
     setScanning(true);
     try {
       const formData = new FormData();
       formData.append('image', blob, 'scan.jpg');
-      if (activeDeckId) formData.append('deckId', activeDeckId);
-
       const res = await fetch('/api/scan', { method: 'POST', body: formData });
       const data = await res.json();
-
       if (res.ok && data.card) {
         setResult(data.card);
         setScanCount((c) => c + 1);
@@ -110,39 +112,29 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
         setCooldown(true);
         setTimeout(() => setCooldown(false), 3000);
       }
-    } catch (err) {
-      // Silent fail for live scan
-    } finally {
-      setScanning(false);
-    }
-  }, [scanning, cooldown, scanCount, scanLimit, activeDeckId]);
+    } catch { /* silent fail on live scan */ }
+    finally { setScanning(false); }
+  }, [scanning, cooldown, scanCount, scanLimit]);
 
-  // Live scan debounced interval
   useEffect(() => {
     if (mode !== 'Live Scan' || !isOnline) return;
-
     scanIntervalRef.current = setInterval(async () => {
       if (scanning || cooldown || result) return;
       const blob = await captureFrame();
       if (blob) submitScan(blob);
     }, 2500);
-
     return () => clearInterval(scanIntervalRef.current);
   }, [mode, isOnline, scanning, cooldown, result, captureFrame, submitScan]);
 
   const handlePhotoUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     setScanning(true);
     try {
       const formData = new FormData();
       formData.append('image', file);
-      if (activeDeckId) formData.append('deckId', activeDeckId);
-
       const res = await fetch('/api/scan', { method: 'POST', body: formData });
       const data = await res.json();
-
       if (res.ok && data.card) {
         setResult(data.card);
         setScanCount((c) => c + 1);
@@ -150,11 +142,8 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
       } else {
         alert(data.error || 'Card not recognized');
       }
-    } catch (err) {
-      alert('Failed to scan photo');
-    } finally {
-      setScanning(false);
-    }
+    } catch { alert('Failed to scan photo'); }
+    finally { setScanning(false); }
   };
 
   const handleSearch = async (query) => {
@@ -163,8 +152,7 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
     setSearchLoading(true);
     try {
       const res = await fetch(`/api/scryfall/autocomplete?q=${encodeURIComponent(query)}`);
-      const names = await res.json();
-      setSuggestions(names.slice(0, 8));
+      setSuggestions((await res.json()).slice(0, 8));
     } catch { setSuggestions([]); }
     setSearchLoading(false);
   };
@@ -175,14 +163,52 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
     setSearchLoading(true);
     try {
       const res = await fetch(`/api/scryfall/card?name=${encodeURIComponent(name)}`);
-      const card = await res.json();
-      if (res.ok) setResult(card);
+      if (res.ok) setResult(await res.json());
     } catch {}
     setSearchLoading(false);
   };
 
+  // Create a new deck and return its id
+  const createNewDeck = async (name, format) => {
+    setCreatingDeck(true);
+    const { data, error } = await supabase
+      .from('decks')
+      .insert({ user_id: userId, name: name.trim(), format, card_count: 0 })
+      .select()
+      .single();
+    setCreatingDeck(false);
+    if (error || !data) { alert('Failed to create deck'); return null; }
+    setDecks((prev) => [data, ...prev]);
+    setActiveDeckId(data.id);
+    return data.id;
+  };
+
   const addCardToDeck = async (card, deckId) => {
-    if (!deckId) return;
+    // If "New Deck" is selected, show the creation form first
+    if (deckId === NEW_DECK || !deckId) {
+      setShowNewDeckForm(true);
+      // Store card to add after deck creation
+      pendingCardRef.current = card;
+      return;
+    }
+    await doAddCard(card, deckId);
+  };
+
+  const pendingCardRef = useRef(null);
+
+  const handleNewDeckSubmit = async (e) => {
+    e.preventDefault();
+    if (!newDeckName.trim()) return;
+    const newId = await createNewDeck(newDeckName, newDeckFormat);
+    if (newId && pendingCardRef.current) {
+      await doAddCard(pendingCardRef.current, newId);
+      pendingCardRef.current = null;
+    }
+    setShowNewDeckForm(false);
+    setNewDeckName('');
+  };
+
+  const doAddCard = async (card, deckId) => {
     try {
       const { data: existing } = await supabase
         .from('deck_cards')
@@ -192,10 +218,7 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
         .maybeSingle();
 
       if (existing) {
-        await supabase
-          .from('deck_cards')
-          .update({ quantity: existing.quantity + 1 })
-          .eq('id', existing.id);
+        await supabase.from('deck_cards').update({ quantity: existing.quantity + 1 }).eq('id', existing.id);
       } else {
         await supabase.from('deck_cards').insert({
           deck_id: deckId,
@@ -208,9 +231,7 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
       }
       setResult(null);
       if (navigator.vibrate) navigator.vibrate(50);
-    } catch (err) {
-      alert('Failed to add card');
-    }
+    } catch { alert('Failed to add card'); }
   };
 
   return (
@@ -218,19 +239,21 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
       {/* Camera feed */}
       {mode === 'Live Scan' && (
         <>
-          <video
-            ref={videoRef}
-            playsInline
-            muted
-            autoPlay
-            className="absolute inset-0 w-full h-full object-cover"
-          />
+          <video ref={videoRef} playsInline muted autoPlay className="absolute inset-0 w-full h-full object-cover" />
           <canvas ref={canvasRef} className="hidden" />
           {cameraError && (
-            <div className="absolute inset-0 flex items-center justify-center p-6">
+            <div className="absolute inset-0 flex items-center justify-center p-6" style={{ background: '#0a0e1a' }}>
               <div className="text-center">
                 <div className="text-5xl mb-4">📷</div>
-                <p className="text-text-secondary text-sm">{cameraError}</p>
+                <p className="text-white font-semibold mb-2">Camera access needed</p>
+                <p className="text-slate-400 text-sm">{cameraError}</p>
+                <button
+                  onClick={startCamera}
+                  className="mt-4 rounded-xl px-6 py-3 text-sm font-semibold"
+                  style={{ background: '#f59e0b', color: '#0a0e1a' }}
+                >
+                  Try Again
+                </button>
               </div>
             </div>
           )}
@@ -239,21 +262,20 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
               <div className="text-center">
                 <div className="text-5xl mb-4">📡</div>
                 <p className="text-white font-semibold">Scanning requires internet</p>
-                <p className="text-text-secondary text-sm mt-2">Connect to the internet to scan cards</p>
               </div>
             </div>
           )}
         </>
       )}
 
-      {/* Scan frame overlay */}
+      {/* Scan frame */}
       {mode === 'Live Scan' && isOnline && !cameraError && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div
             className={scanning ? 'scan-pulse' : ''}
             style={{
-              width: 240,
-              height: 160,
+              width: 260,
+              height: 180,
               border: `2px solid ${scanning ? '#f59e0b' : 'rgba(245,158,11,0.6)'}`,
               borderRadius: 12,
               boxShadow: scanning ? '0 0 20px rgba(245,158,11,0.3)' : 'none',
@@ -265,48 +287,31 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
 
       {/* Photo mode */}
       {mode === 'Photo' && (
-        <div
-          className="absolute inset-0 flex flex-col items-center justify-center p-8"
-          style={{ background: '#0a0e1a' }}
-        >
+        <div className="absolute inset-0 flex flex-col items-center justify-center p-8" style={{ background: '#0a0e1a' }}>
           <div className="text-6xl mb-6">🖼️</div>
-          <p className="text-text-secondary text-sm mb-6 text-center">
-            Take or select a photo of a Magic card to identify it
-          </p>
+          <p className="text-slate-400 text-sm mb-6 text-center">Take or select a photo of a Magic card</p>
           <label
             className="w-full max-w-xs flex items-center justify-center gap-3 rounded-xl py-4 px-6 font-semibold cursor-pointer"
             style={{ background: '#f59e0b', color: '#0a0e1a', minHeight: 44 }}
           >
             {scanning ? 'Identifying…' : '📷 Select Photo'}
-            <input
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={handlePhotoUpload}
-              disabled={scanning}
-              className="hidden"
-            />
+            <input type="file" accept="image/*" capture="environment" onChange={handlePhotoUpload} disabled={scanning} className="hidden" />
           </label>
         </div>
       )}
 
       {/* Search mode */}
       {mode === 'Search' && (
-        <div className="absolute inset-0 p-4 pt-20" style={{ background: '#0a0e1a' }}>
+        <div className="absolute inset-0 p-4 pt-24 overflow-y-auto" style={{ background: '#0a0e1a' }}>
           <div className="relative">
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => handleSearch(e.target.value)}
               placeholder="Search card name…"
-              className="w-full rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 ring-gold"
-              style={{
-                background: '#1a2235',
-                border: '1px solid #1e2d47',
-                color: '#f1f5f9',
-                minHeight: 44,
-              }}
               autoFocus
+              className="w-full rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 ring-gold"
+              style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 44 }}
             />
             {searchLoading && (
               <div className="absolute right-3 top-1/2 -translate-y-1/2">
@@ -314,22 +319,14 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
               </div>
             )}
           </div>
-
           {suggestions.length > 0 && (
-            <div
-              className="mt-2 rounded-xl overflow-hidden"
-              style={{ background: '#111827', border: '1px solid #1e2d47' }}
-            >
+            <div className="mt-2 rounded-xl overflow-hidden" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
               {suggestions.map((name, i) => (
                 <button
                   key={i}
                   onClick={() => handleSelectSearchCard(name)}
                   className="w-full text-left px-4 py-3 text-sm hover:bg-bg-elevated transition-colors"
-                  style={{
-                    color: '#f1f5f9',
-                    borderBottom: i < suggestions.length - 1 ? '1px solid #1e2d47' : 'none',
-                    minHeight: 44,
-                  }}
+                  style={{ color: '#f1f5f9', borderBottom: i < suggestions.length - 1 ? '1px solid #1e2d47' : 'none', minHeight: 44 }}
                 >
                   {name}
                 </button>
@@ -341,30 +338,24 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
 
       {/* Top overlay: Deck selector + mode toggle */}
       <div
-        className="absolute top-0 left-0 right-0 px-4 pt-4 pb-2"
-        style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.7) 0%, transparent 100%)' }}
+        className="absolute top-0 left-0 right-0 px-4 pt-4 pb-2 z-10"
+        style={{ background: mode === 'Live Scan' ? 'linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, transparent 100%)' : 'transparent' }}
       >
         {/* Deck selector */}
         <div className="flex items-center justify-between mb-3">
           <button
             onClick={() => setShowDeckPicker(!showDeckPicker)}
             className="flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium"
-            style={{ background: 'rgba(17,24,39,0.85)', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 36 }}
+            style={{ background: 'rgba(17,24,39,0.9)', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 36 }}
           >
-            <span>📦</span>
-            <span className="max-w-32 truncate">{activeDeck?.name || 'No deck'}</span>
+            <span>{isNewDeck ? '✨' : '📦'}</span>
+            <span className="max-w-36 truncate">{isNewDeck ? 'New Deck' : (activeDeck?.name || 'Select Deck')}</span>
             <span style={{ color: '#94a3b8' }}>▾</span>
           </button>
-
-          {/* Scan count badge */}
           {tier === 'free' && (
             <div
               className="rounded-full px-3 py-1 text-xs font-medium"
-              style={{
-                background: scanCount >= 80 ? 'rgba(239,68,68,0.9)' : 'rgba(17,24,39,0.85)',
-                color: '#f1f5f9',
-                border: '1px solid #1e2d47',
-              }}
+              style={{ background: scanCount >= 80 ? 'rgba(239,68,68,0.9)' : 'rgba(17,24,39,0.9)', color: '#f1f5f9', border: '1px solid #1e2d47' }}
             >
               {scanCount}/{scanLimit}
             </div>
@@ -373,12 +364,22 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
 
         {/* Deck picker dropdown */}
         {showDeckPicker && (
-          <div
-            className="rounded-xl overflow-hidden mb-2"
-            style={{ background: '#111827', border: '1px solid #1e2d47' }}
-          >
+          <div className="rounded-xl overflow-hidden mb-2 max-h-56 overflow-y-auto" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
+            {/* New deck option */}
+            <button
+              onClick={() => { setActiveDeckId(NEW_DECK); setShowDeckPicker(false); }}
+              className="w-full text-left px-4 py-3 text-sm flex items-center gap-2"
+              style={{
+                color: isNewDeck ? '#f59e0b' : '#a78bfa',
+                borderBottom: '1px solid #1e2d47',
+                minHeight: 44,
+                background: isNewDeck ? 'rgba(245,158,11,0.1)' : 'transparent',
+              }}
+            >
+              {isNewDeck && '✓ '}✨ Create New Deck
+            </button>
             {decks.length === 0 && (
-              <div className="px-4 py-3 text-sm text-text-secondary">No decks yet — create one in My Decks</div>
+              <div className="px-4 py-3 text-sm text-slate-400">No decks yet</div>
             )}
             {decks.map((deck) => (
               <button
@@ -394,10 +395,7 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
               >
                 {deck.id === activeDeckId && '✓ '}
                 {deck.name}
-                <span
-                  className="ml-auto text-xs rounded-full px-2 py-0.5"
-                  style={{ background: deck.format === 'commander' ? '#7c3aed' : '#1a2235', color: '#f1f5f9' }}
-                >
+                <span className="ml-auto text-xs rounded-full px-2 py-0.5" style={{ background: deck.format === 'commander' ? '#7c3aed' : '#1a2235', color: '#f1f5f9' }}>
                   {deck.format === 'commander' ? 'CMD' : '60'}
                 </span>
               </button>
@@ -406,20 +404,13 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
         )}
 
         {/* Mode toggle */}
-        <div
-          className="flex rounded-xl p-1"
-          style={{ background: 'rgba(17,24,39,0.85)', border: '1px solid #1e2d47' }}
-        >
+        <div className="flex rounded-xl p-1" style={{ background: 'rgba(17,24,39,0.9)', border: '1px solid #1e2d47' }}>
           {MODES.map((m) => (
             <button
               key={m}
-              onClick={() => { setMode(m); setResult(null); }}
+              onClick={() => { setMode(m); setResult(null); setSuggestions([]); }}
               className="flex-1 py-2 text-xs font-semibold rounded-lg transition-all"
-              style={{
-                background: mode === m ? '#f59e0b' : 'transparent',
-                color: mode === m ? '#0a0e1a' : '#94a3b8',
-                minHeight: 36,
-              }}
+              style={{ background: mode === m ? '#f59e0b' : 'transparent', color: mode === m ? '#0a0e1a' : '#94a3b8', minHeight: 36 }}
             >
               {m}
             </button>
@@ -429,10 +420,8 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
 
       {/* Scanning indicator */}
       {scanning && mode === 'Live Scan' && (
-        <div
-          className="absolute bottom-24 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full px-4 py-2 text-sm"
-          style={{ background: 'rgba(245,158,11,0.9)', color: '#0a0e1a', fontWeight: 600 }}
-        >
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full px-4 py-2 text-sm z-10"
+          style={{ background: 'rgba(245,158,11,0.9)', color: '#0a0e1a', fontWeight: 600 }}>
           <div className="w-3 h-3 border-2 border-bg-primary border-t-transparent rounded-full animate-spin" />
           Identifying…
         </div>
@@ -440,28 +429,19 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
 
       {/* Scan limit warning */}
       {tier === 'free' && scanCount >= scanLimit && (
-        <div className="absolute inset-0 flex items-center justify-center p-6 bg-black/70">
-          <div
-            className="rounded-2xl p-6 text-center max-w-xs"
-            style={{ background: '#111827', border: '1px solid #1e2d47' }}
-          >
+        <div className="absolute inset-0 flex items-center justify-center p-6 bg-black/70 z-20">
+          <div className="rounded-2xl p-6 text-center max-w-xs" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
             <div className="text-4xl mb-3">🚫</div>
-            <h3 className="font-bold text-text-primary mb-2">Monthly limit reached</h3>
-            <p className="text-text-secondary text-sm mb-4">
-              You've used all 100 free scans this month. Upgrade to Pro for unlimited scanning.
-            </p>
-            <button
-              onClick={() => window.location.href = '/profile'}
-              className="w-full rounded-xl py-3 font-semibold text-sm"
-              style={{ background: '#f59e0b', color: '#0a0e1a' }}
-            >
+            <h3 className="font-bold text-white mb-2">Monthly limit reached</h3>
+            <p className="text-slate-400 text-sm mb-4">You've used all 100 free scans this month.</p>
+            <button onClick={() => router.push('/profile')} className="w-full rounded-xl py-3 font-semibold text-sm" style={{ background: '#f59e0b', color: '#0a0e1a' }}>
               Upgrade to Pro
             </button>
           </div>
         </div>
       )}
 
-      {/* Card result bottom sheet */}
+      {/* Card result sheet */}
       {result && (
         <CardResultSheet
           card={result}
@@ -469,7 +449,56 @@ export default function Scanner({ decks, tier, scanCount: initialScanCount }) {
           activeDeckId={activeDeckId}
           onAdd={addCardToDeck}
           onDismiss={() => setResult(null)}
+          isNewDeckSelected={isNewDeck}
         />
+      )}
+
+      {/* New deck creation form (shown when adding a card to "New Deck") */}
+      {showNewDeckForm && (
+        <div className="absolute inset-0 flex items-end z-30" style={{ background: 'rgba(0,0,0,0.7)' }}
+          onClick={(e) => { if (e.target === e.currentTarget) setShowNewDeckForm(false); }}>
+          <div className="w-full rounded-t-2xl px-4 pt-4 pb-8" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
+            <div className="flex justify-center mb-4">
+              <div className="w-10 h-1 rounded-full" style={{ background: '#1e2d47' }} />
+            </div>
+            <h2 className="text-lg font-bold text-white mb-1">Name Your New Deck</h2>
+            <p className="text-slate-400 text-sm mb-4">The scanned card will be added automatically.</p>
+            <form onSubmit={handleNewDeckSubmit} className="space-y-4">
+              <input
+                type="text"
+                value={newDeckName}
+                onChange={(e) => setNewDeckName(e.target.value)}
+                placeholder="e.g. Atraxa Superfriends"
+                required
+                autoFocus
+                className="w-full rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 ring-gold"
+                style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 44 }}
+              />
+              <div className="flex gap-3">
+                {[{ value: 'commander', label: 'Commander', desc: '100-card' }, { value: '60card', label: '60-Card', desc: 'Standard/Modern' }].map((f) => (
+                  <button type="button" key={f.value} onClick={() => setNewDeckFormat(f.value)}
+                    className="flex-1 rounded-xl p-3 text-sm text-left transition-all"
+                    style={{ background: newDeckFormat === f.value ? 'rgba(245,158,11,0.15)' : '#1a2235', border: `1px solid ${newDeckFormat === f.value ? '#f59e0b' : '#1e2d47'}`, color: newDeckFormat === f.value ? '#f59e0b' : '#94a3b8', minHeight: 64 }}>
+                    <div className="font-semibold">{f.label}</div>
+                    <div className="text-xs mt-0.5 opacity-70">{f.desc}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="flex gap-3 pt-1">
+                <button type="button" onClick={() => setShowNewDeckForm(false)}
+                  className="flex-1 rounded-xl py-3 text-sm font-medium"
+                  style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 44 }}>
+                  Cancel
+                </button>
+                <button type="submit" disabled={creatingDeck || !newDeckName.trim()}
+                  className="flex-1 rounded-xl py-3 text-sm font-semibold disabled:opacity-50"
+                  style={{ background: '#f59e0b', color: '#0a0e1a', minHeight: 44 }}>
+                  {creatingDeck ? 'Creating…' : 'Create & Add Card'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );
