@@ -42,25 +42,36 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Deck not found' }, { status: 404 });
     }
 
-    // Fetch cards with cache data
+    // Fetch deck_cards (no embedded join — no FK exists from scryfall_id to card_cache)
     const { data: deckCards } = await supabase
       .from('deck_cards')
-      .select(`
-        *,
-        card_cache (
-          card_name, oracle_text, mana_cost, cmc, type_line,
-          colors, color_identity, is_legendary, is_creature, is_land,
-          power, toughness, legalities
-        )
-      `)
+      .select('id, scryfall_id, card_name, quantity, is_commander, is_partner')
       .eq('deck_id', deckId);
 
     if (!deckCards || deckCards.length === 0) {
       return NextResponse.json({ error: 'Deck has no cards' }, { status: 400 });
     }
 
+    // Separately fetch card_cache for all scryfall_ids
+    const scryfallIds = deckCards.map((dc) => dc.scryfall_id).filter(Boolean);
+    let cacheMap = {};
+    if (scryfallIds.length > 0) {
+      const serviceClient = createServiceClient();
+      const { data: cached } = await serviceClient
+        .from('card_cache')
+        .select('scryfall_id, card_name, oracle_text, mana_cost, cmc, type_line, colors, color_identity, is_legendary, is_creature, is_land, power, toughness, legalities')
+        .in('scryfall_id', scryfallIds);
+      cacheMap = Object.fromEntries((cached || []).map((c) => [c.scryfall_id, c]));
+    }
+
+    // Merge card data
+    const mergedCards = deckCards.map((dc) => ({
+      ...dc,
+      card_cache: cacheMap[dc.scryfall_id] || null,
+    }));
+
     // Compute hash
-    const cardList = deckCards.map((c) => ({
+    const cardList = mergedCards.map((c) => ({
       card_name: c.card_cache?.card_name || c.card_name,
       quantity: c.quantity,
     }));
@@ -95,13 +106,13 @@ export async function POST(request) {
 
     // Build card list for prompt
     const colorIdentity = deck.commander_name
-      ? deckCards
+      ? mergedCards
           .filter((c) => c.is_commander)
           .flatMap((c) => c.card_cache?.color_identity || [])
           .filter((v, i, a) => a.indexOf(v) === i)
       : [];
 
-    const cardListText = deckCards
+    const cardListText = mergedCards
       .map((c) => {
         const name = c.card_cache?.card_name || c.card_name;
         const type = c.card_cache?.type_line || '';
