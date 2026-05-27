@@ -5,6 +5,7 @@ import Image from 'next/image';
 import { ManaCostDisplay, ColourPips } from './ColourPip';
 
 export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDismiss }) {
+  // activeDeckId may be null (when 'New Deck' is selected in scanner) — fall back to first real deck
   const [selectedDeckId, setSelectedDeckId] = useState(activeDeckId || decks[0]?.id || null);
   const [adding, setAdding] = useState(false);
 

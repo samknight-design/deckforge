@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import BottomNav from '@/components/BottomNav';
+import ToastContainer from '@/components/Toast';
 
 export default async function AppLayout({ children }) {
   const supabase = createClient();
@@ -16,6 +17,7 @@ export default async function AppLayout({ children }) {
         {children}
       </main>
       <BottomNav />
+      <ToastContainer />
     </div>
   );
 }

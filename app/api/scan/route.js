@@ -51,7 +51,7 @@ export async function POST(request) {
       "You are identifying Magic: The Gathering cards. Look at this image and identify the card name exactly as printed on the card. Reply with ONLY the card name, nothing else. If you cannot identify a card, reply with 'UNKNOWN'.";
 
     const result = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-1.5-flash',
       contents: [
         {
           parts: [
