@@ -1,16 +1,30 @@
 'use client';
 
 import Link from 'next/link';
-import { ColourPips } from './ColourPip';
 
-function ProgressBar({ value, max, color = '#f59e0b' }) {
+function ProgressBar({ value, max }) {
   const pct = Math.min(100, Math.round((value / max) * 100));
+  const color = pct >= 100 ? '#10b981' : pct >= 75 ? '#f59e0b' : '#94a3b8';
   return (
-    <div className="h-1.5 rounded-full overflow-hidden" style={{ background: '#1e2d47' }}>
-      <div
-        className="h-full rounded-full transition-all"
-        style={{ width: `${pct}%`, background: color }}
-      />
+    <div className="h-1 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.15)' }}>
+      <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+    </div>
+  );
+}
+
+const COLOR_MAP = { W: '#f9fafb', U: '#3b82f6', B: '#6b7280', R: '#ef4444', G: '#22c55e' };
+
+function ColorDots({ colors }) {
+  if (!colors || colors.length === 0) return null;
+  return (
+    <div className="flex gap-1">
+      {colors.map((c) => (
+        <div
+          key={c}
+          className="rounded-full"
+          style={{ width: 8, height: 8, background: COLOR_MAP[c] || '#94a3b8', flexShrink: 0 }}
+        />
+      ))}
     </div>
   );
 }
@@ -18,52 +32,80 @@ function ProgressBar({ value, max, color = '#f59e0b' }) {
 export default function DeckCard({ deck }) {
   const target = deck.format === 'commander' ? 100 : 60;
   const count = deck.card_count || 0;
-  const commanderColors = deck.commander_name ? [] : [];
+  const hasArt = !!deck.commander_image_url;
   const valueDisplay = deck.estimated_value_eur != null
     ? `€${parseFloat(deck.estimated_value_eur).toFixed(2)}`
-    : '—';
+    : null;
 
   return (
     <Link href={`/decks/${deck.id}`} className="block">
       <div
-        className="rounded-2xl p-4 transition-all active:scale-95"
-        style={{ background: '#111827', border: '1px solid #1e2d47' }}
+        className="relative rounded-2xl overflow-hidden transition-all active:scale-95"
+        style={{ minHeight: 160 }}
       >
-        {/* Header row */}
-        <div className="flex items-start justify-between mb-2">
-          <div className="flex-1 min-w-0">
-            <h3 className="font-bold text-text-primary truncate text-base">{deck.name}</h3>
+        {/* Commander artwork background */}
+        {hasArt && (
+          <img
+            src={deck.commander_image_url}
+            alt=""
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{ objectPosition: 'center 15%' }}
+          />
+        )}
+
+        {/* Gradient overlay — darker without art */}
+        <div
+          className="absolute inset-0"
+          style={{
+            background: hasArt
+              ? 'linear-gradient(160deg, rgba(10,14,26,0.25) 0%, rgba(10,14,26,0.65) 45%, rgba(10,14,26,0.97) 100%)'
+              : '#111827',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: 16,
+          }}
+        />
+
+        {/* Content */}
+        <div className="relative z-10 p-4 flex flex-col h-full" style={{ minHeight: 160 }}>
+          {/* Top row: format badge */}
+          <div className="flex justify-end mb-auto">
+            <span
+              className="text-xs font-semibold rounded-full px-2.5 py-1 backdrop-blur"
+              style={{
+                background: deck.format === 'commander' ? 'rgba(124,58,237,0.55)' : 'rgba(245,158,11,0.55)',
+                color: '#fff',
+                border: `1px solid ${deck.format === 'commander' ? 'rgba(167,139,250,0.5)' : 'rgba(245,158,11,0.5)'}`,
+              }}
+            >
+              {deck.format === 'commander' ? 'Commander' : '60-Card'}
+            </span>
+          </div>
+
+          {/* Bottom: deck info */}
+          <div>
+            <h3 className="font-bold text-white text-lg leading-snug truncate drop-shadow">
+              {deck.name}
+            </h3>
+
             {deck.commander_name && (
-              <p className="text-xs truncate mt-0.5" style={{ color: '#7c3aed' }}>
+              <p className="text-xs mt-0.5 truncate" style={{ color: 'rgba(255,255,255,0.7)' }}>
                 ⚔ {deck.commander_name}
                 {deck.partner_name && ` + ${deck.partner_name}`}
               </p>
             )}
+
+            <div className="flex items-center gap-3 mt-2 mb-2">
+              <span className="text-xs" style={{ color: 'rgba(255,255,255,0.6)' }}>
+                <span className="font-bold text-white">{count}</span>/{target}
+              </span>
+              {valueDisplay && (
+                <span className="text-xs font-semibold" style={{ color: '#10b981' }}>{valueDisplay}</span>
+              )}
+            </div>
+
+            <ProgressBar value={count} max={target} />
           </div>
-          <span
-            className="ml-2 flex-shrink-0 text-xs font-semibold rounded-full px-2.5 py-1"
-            style={{
-              background: deck.format === 'commander' ? 'rgba(124,58,237,0.15)' : 'rgba(245,158,11,0.15)',
-              color: deck.format === 'commander' ? '#a78bfa' : '#f59e0b',
-              border: `1px solid ${deck.format === 'commander' ? 'rgba(124,58,237,0.3)' : 'rgba(245,158,11,0.3)'}`,
-            }}
-          >
-            {deck.format === 'commander' ? 'Commander' : '60-Card'}
-          </span>
         </div>
-
-        {/* Stats row */}
-        <div className="flex items-center gap-4 mb-3">
-          <span className="text-sm text-text-secondary">
-            <span className="font-semibold text-text-primary">{count}</span>/{target} cards
-          </span>
-          <span className="text-sm font-semibold" style={{ color: '#10b981' }}>
-            {valueDisplay}
-          </span>
-        </div>
-
-        {/* Progress bar */}
-        <ProgressBar value={count} max={target} />
       </div>
     </Link>
   );

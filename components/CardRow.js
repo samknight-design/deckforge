@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { ManaCostDisplay, ColourPips } from './ColourPip';
 import CardModal from './CardModal';
 
-export default function CardRow({ card, format, onQuantityChange, onMakeCommander, onMakePartner }) {
+export default function CardRow({ card, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner }) {
   const [showModal, setShowModal] = useState(false);
   const isCommander = card.is_commander;
   const isPartner = card.is_partner;
@@ -96,6 +96,7 @@ export default function CardRow({ card, format, onQuantityChange, onMakeCommande
         <CardModal
           card={card}
           format={format}
+          hasCommander={hasCommander}
           onClose={() => setShowModal(false)}
           onMakeCommander={onMakeCommander ? () => { onMakeCommander(card); setShowModal(false); } : null}
           onMakePartner={onMakePartner ? () => { onMakePartner(card); setShowModal(false); } : null}

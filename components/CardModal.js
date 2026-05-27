@@ -2,9 +2,10 @@
 
 import { ManaCostDisplay, ColourPips } from './ColourPip';
 
-export default function CardModal({ card, format, onClose, onMakeCommander, onMakePartner }) {
+export default function CardModal({ card, format, hasCommander, onClose, onMakeCommander, onMakePartner }) {
   const formatPrice = (v) => (v != null ? `€${parseFloat(v).toFixed(2)}` : '—');
   const formatUsd = (v) => (v != null ? `$${parseFloat(v).toFixed(2)}` : '—');
+  const isCommander = format === 'commander';
 
   return (
     <>
@@ -25,14 +26,6 @@ export default function CardModal({ card, format, onClose, onMakeCommander, onMa
               alt={card.card_name}
               className="absolute inset-0 w-full h-full object-contain"
             />
-            {card.image_uri_back && (
-              <img
-                src={card.image_uri_back}
-                alt={`${card.card_name} (back)`}
-                className="absolute top-2 right-2 rounded-lg"
-                style={{ width: 60, height: 84, objectFit: 'cover', border: '2px solid #1e2d47' }}
-              />
-            )}
           </div>
         )}
 
@@ -41,6 +34,20 @@ export default function CardModal({ card, format, onClose, onMakeCommander, onMa
           <div className="flex items-start justify-between gap-2 mb-2">
             <h2 className="font-bold text-text-primary text-lg leading-snug flex-1">{card.card_name}</h2>
             <ManaCostDisplay manaCost={card.mana_cost} size={18} />
+          </div>
+
+          {/* Badges */}
+          <div className="flex items-center gap-2 mb-2 flex-wrap">
+            {card.is_commander && (
+              <span className="text-xs font-bold rounded px-2 py-0.5" style={{ background: 'rgba(124,58,237,0.3)', color: '#a78bfa' }}>
+                ⚔ Commander
+              </span>
+            )}
+            {card.is_partner && (
+              <span className="text-xs font-bold rounded px-2 py-0.5" style={{ background: 'rgba(124,58,237,0.3)', color: '#a78bfa' }}>
+                ⚔ Partner Commander
+              </span>
+            )}
           </div>
 
           {/* Type line */}
@@ -100,34 +107,37 @@ export default function CardModal({ card, format, onClose, onMakeCommander, onMa
             </div>
           )}
 
-          {/* Action buttons */}
-          <div className="flex gap-2 flex-wrap">
-            {onMakeCommander && format === 'commander' && card.is_legendary && !card.is_commander && (
-              <button
-                onClick={onMakeCommander}
-                className="flex-1 rounded-xl py-2.5 text-sm font-semibold"
-                style={{ background: 'rgba(124,58,237,0.2)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', minHeight: 44 }}
-              >
-                ⚔ Set as Commander
-              </button>
-            )}
-            {onMakePartner && format === 'commander' && card.is_legendary && !card.is_commander && !card.is_partner && (
-              <button
-                onClick={onMakePartner}
-                className="flex-1 rounded-xl py-2.5 text-sm font-semibold"
-                style={{ background: 'rgba(124,58,237,0.1)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.3)', minHeight: 44 }}
-              >
-                + Set as Partner
-              </button>
-            )}
-            <button
-              onClick={onClose}
-              className="flex-1 rounded-xl py-2.5 text-sm font-medium"
-              style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 44 }}
-            >
-              Close
-            </button>
-          </div>
+          {/* Commander action buttons */}
+          {isCommander && card.is_legendary && (
+            <div className="flex gap-2 mb-2 flex-wrap">
+              {!card.is_commander && onMakeCommander && (
+                <button
+                  onClick={onMakeCommander}
+                  className="flex-1 rounded-xl py-2.5 text-sm font-semibold"
+                  style={{ background: 'rgba(124,58,237,0.2)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', minHeight: 44 }}
+                >
+                  ⚔ Set as Commander
+                </button>
+              )}
+              {!card.is_partner && !card.is_commander && onMakePartner && (
+                <button
+                  onClick={onMakePartner}
+                  className="flex-1 rounded-xl py-2.5 text-sm font-semibold"
+                  style={{ background: 'rgba(124,58,237,0.1)', color: '#c4b5fd', border: '1px solid rgba(124,58,237,0.3)', minHeight: 44 }}
+                >
+                  {hasCommander ? '⚔ Set as Partner Commander' : '⚔ Set as 2nd Commander'}
+                </button>
+              )}
+            </div>
+          )}
+
+          <button
+            onClick={onClose}
+            className="w-full rounded-xl py-2.5 text-sm font-medium"
+            style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 44 }}
+          >
+            Close
+          </button>
         </div>
       </div>
     </>

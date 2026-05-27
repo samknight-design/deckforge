@@ -3,7 +3,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
-import { groupCardsByType, computeDeckHash } from '@/lib/deckUtils';
+import { groupCardsByType, computeDeckHash, getDeckWarnings } from '@/lib/deckUtils';
 import { showToast } from './Toast';
 import CardRow from './CardRow';
 import StatsPanel from './StatsPanel';
@@ -24,7 +24,7 @@ function ProgressBar({ value, max }) {
   );
 }
 
-function CollapsibleGroup({ name, cards, format, onQuantityChange, onMakeCommander, onMakePartner }) {
+function CollapsibleGroup({ name, cards, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner }) {
   const [open, setOpen] = useState(true);
   const count = cards.reduce((s, c) => s + (c.quantity || 1), 0);
 
@@ -49,6 +49,7 @@ function CollapsibleGroup({ name, cards, format, onQuantityChange, onMakeCommand
               key={card.id || card.scryfall_id}
               card={card}
               format={format}
+              hasCommander={hasCommander}
               onQuantityChange={onQuantityChange}
               onMakeCommander={format === 'commander' && card.is_legendary ? onMakeCommander : null}
               onMakePartner={format === 'commander' && card.is_legendary ? onMakePartner : null}
@@ -84,6 +85,19 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
   const hasChanged = deck.insight_deck_hash !== deckHash;
 
   const groupedCards = useMemo(() => groupCardsByType(cards), [cards]);
+
+  // Compute commander color identity from cards marked as commander/partner
+  const commanderColorIdentity = useMemo(() => {
+    const cmdCards = cards.filter((c) => c.is_commander || c.is_partner);
+    return [...new Set(cmdCards.flatMap((c) => c.color_identity || []))];
+  }, [cards]);
+
+  const deckWarnings = useMemo(
+    () => getDeckWarnings(cards, deck.format, commanderColorIdentity),
+    [cards, deck.format, commanderColorIdentity]
+  );
+
+  const [showWarnings, setShowWarnings] = useState(false);
 
   const saveName = async () => {
     if (editedName.trim() === deck.name) { setIsEditingName(false); return; }
@@ -154,13 +168,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
     }
   };
 
-  const handleInsights = () => {
-    if (tier !== 'pro') {
-      setShowUpgrade(true);
-    } else {
-      setShowInsights(true);
-    }
-  };
+  const handleInsights = () => setShowInsights(true);
 
   const deleteDeck = async () => {
     if (!confirm('Delete this deck? This cannot be undone.')) return;
@@ -268,6 +276,34 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
       <div className="flex-1 overflow-y-auto scroll-y pb-20">
         {activeTab === 'Cards' && (
           <div className="px-3 pt-3">
+            {/* Validation warnings */}
+            {deckWarnings.length > 0 && (
+              <div className="mb-3 rounded-xl overflow-hidden" style={{ border: '1px solid rgba(239,68,68,0.3)' }}>
+                <button
+                  onClick={() => setShowWarnings(!showWarnings)}
+                  className="w-full flex items-center justify-between px-3 py-2.5 text-sm font-semibold"
+                  style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171' }}
+                >
+                  <span>⚠️ {deckWarnings.length} issue{deckWarnings.length > 1 ? 's' : ''} found</span>
+                  <span style={{ fontSize: 10 }}>{showWarnings ? '▾' : '▸'}</span>
+                </button>
+                {showWarnings && (
+                  <div className="px-3 py-2 space-y-1.5" style={{ background: 'rgba(239,68,68,0.05)' }}>
+                    {deckWarnings.map((w, i) => (
+                      <div key={i} className="text-xs" style={{ color: '#fca5a5' }}>
+                        {w.type === 'singleton' && (
+                          <span>📋 <strong>{w.card}</strong> — {w.qty} copies (singleton violation)</span>
+                        )}
+                        {w.type === 'color_identity' && (
+                          <span>🎨 <strong>{w.card}</strong> — outside commander's color identity</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Action row */}
             <div className="flex gap-2 mb-3">
               <button
@@ -338,6 +374,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
                     name={groupName}
                     cards={groupCards}
                     format={deck.format}
+                    hasCommander={!!deck.commander_name}
                     onQuantityChange={updateQuantity}
                     onMakeCommander={makeCommander}
                     onMakePartner={makePartner}
@@ -377,28 +414,16 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
         style={{ background: 'linear-gradient(to top, #0a0e1a 70%, transparent)', pointerEvents: 'none' }}
       >
         <button
-          onClick={handleInsights}
+          onClick={() => setShowInsights(true)}
           className="w-full rounded-2xl py-3.5 text-sm font-bold flex items-center justify-center gap-2"
           style={{
-            background: tier === 'pro'
-              ? 'linear-gradient(135deg, #7c3aed, #f59e0b)'
-              : '#1a2235',
-            color: tier === 'pro' ? '#fff' : '#94a3b8',
-            border: tier !== 'pro' ? '1px solid #1e2d47' : 'none',
+            background: 'linear-gradient(135deg, #7c3aed, #f59e0b)',
+            color: '#fff',
             minHeight: 48,
             pointerEvents: 'all',
           }}
         >
-          <span>✨</span>
-          {tier === 'pro' ? 'Generate Insights' : '✨ Generate Insights (Pro)'}
-          {tier !== 'pro' && (
-            <span
-              className="ml-1 text-xs rounded-full px-2 py-0.5"
-              style={{ background: 'rgba(245,158,11,0.2)', color: '#f59e0b' }}
-            >
-              Pro
-            </span>
-          )}
+          ✨ Generate Insights
         </button>
       </div>
 
