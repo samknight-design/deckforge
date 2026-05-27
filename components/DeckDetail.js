@@ -4,6 +4,7 @@ import { useState, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { groupCardsByType, computeDeckHash } from '@/lib/deckUtils';
+import { showToast } from './Toast';
 import CardRow from './CardRow';
 import StatsPanel from './StatsPanel';
 import CommanderPanel from './CommanderPanel';
@@ -145,10 +146,11 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
   };
 
   const handleImportDone = (imported, failed) => {
-    // Reload the page to get fresh data
     router.refresh();
     if (failed > 0) {
-      alert(`Imported ${imported} cards. ${failed} cards could not be found.`);
+      showToast(`Imported ${imported} cards. ${failed} couldn't be found.`, 'error');
+    } else {
+      showToast(`✓ Imported ${imported} cards`, 'success');
     }
   };
 
@@ -276,7 +278,14 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
                 📋 Import
               </button>
               <button
-                onClick={() => router.push('/scan')}
+                onClick={() => router.push(`/scan?deckId=${deck.id}&mode=Search`)}
+                className="flex-1 flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-semibold"
+                style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 40 }}
+              >
+                🔍 Search
+              </button>
+              <button
+                onClick={() => router.push(`/scan?deckId=${deck.id}`)}
                 className="flex-1 flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-semibold"
                 style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 40 }}
               >
