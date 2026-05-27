@@ -6,11 +6,18 @@ import { createClient } from '@/lib/supabase/client';
 import { showToast } from './Toast';
 import CardResultSheet from './CardResultSheet';
 
-const MODES = ['Live Scan', 'Photo', 'Search'];
+const MODES = ['Scan', 'Search'];
 const NEW_DECK = '__new__';
 
-export default function Scanner({ decks: initialDecks, tier, scanCount: initialScanCount, initialMode = 'Live Scan', initialDeckId, userId }) {
-  const [mode, setMode] = useState(initialMode);
+export default function Scanner({ decks: initialDecks, tier, scanCount: initialScanCount, initialMode = 'Scan', initialDeckId, userId }) {
+  // Normalise legacy 'Live Scan' / 'Photo' values from URL params
+  const normaliseMode = (m) => {
+    if (m === 'Live Scan' || m === 'Photo') return 'Scan';
+    if (MODES.includes(m)) return m;
+    return 'Scan';
+  };
+
+  const [mode, setMode] = useState(normaliseMode(initialMode));
   const [decks, setDecks] = useState(initialDecks);
   const [activeDeckId, setActiveDeckId] = useState(initialDeckId || initialDecks[0]?.id || NEW_DECK);
   const [result, setResult] = useState(null);
@@ -32,6 +39,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const canvasRef = useRef(null);
+  const galleryInputRef = useRef(null);
   const pendingCardRef = useRef(null);
   const supabase = createClient();
   const router = useRouter();
@@ -66,7 +74,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
         setCameraReady(true);
       }
     } catch {
-      setCameraError('Camera access denied. Allow camera permissions in your browser settings.');
+      setCameraError('Camera access denied. Tap "Try Again" or use gallery upload below.');
     }
   }, []);
 
@@ -79,7 +87,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
   }, []);
 
   useEffect(() => {
-    if (mode === 'Live Scan' && isOnline) {
+    if (mode === 'Scan' && isOnline) {
       startCamera();
     } else {
       stopCamera();
@@ -94,16 +102,13 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     canvas.getContext('2d').drawImage(video, 0, 0);
-    return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+    return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
   }, []);
 
-  // Manual tap-to-scan
-  const handleTapScan = useCallback(async () => {
-    if (scanning || scanCount >= scanLimit || !cameraReady) return;
+  const submitImageForScan = useCallback(async (blob) => {
+    if (scanning || scanCount >= scanLimit) return;
     setScanning(true);
     try {
-      const blob = await captureFrame();
-      if (!blob) { setScanning(false); return; }
       const formData = new FormData();
       formData.append('image', blob, 'scan.jpg');
       const res = await fetch('/api/scan', { method: 'POST', body: formData });
@@ -120,29 +125,22 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
     } finally {
       setScanning(false);
     }
-  }, [scanning, scanCount, scanLimit, cameraReady, captureFrame]);
+  }, [scanning, scanCount, scanLimit]);
 
-  const handlePhotoUpload = async (e) => {
+  // Live camera tap-to-scan
+  const handleTapScan = useCallback(async () => {
+    if (scanning || scanCount >= scanLimit || !cameraReady) return;
+    const blob = await captureFrame();
+    if (blob) await submitImageForScan(blob);
+  }, [scanning, scanCount, scanLimit, cameraReady, captureFrame, submitImageForScan]);
+
+  // Gallery / file upload
+  const handleGalleryUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setScanning(true);
-    try {
-      const formData = new FormData();
-      formData.append('image', file);
-      const res = await fetch('/api/scan', { method: 'POST', body: formData });
-      const data = await res.json();
-      if (res.ok && data.card) {
-        setResult(data.card);
-        setScanCount((c) => c + 1);
-        if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
-      } else {
-        showToast(data.error || 'Card not recognized', 'error');
-      }
-    } catch {
-      showToast('Failed to scan photo', 'error');
-    } finally {
-      setScanning(false);
-    }
+    // Reset input so same file can be re-selected if needed
+    e.target.value = '';
+    await submitImageForScan(file);
   };
 
   const handleSearch = async (query) => {
@@ -211,8 +209,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
     }
 
     const targetDeck = decks.find((d) => d.id === deckId);
-    const deckName = targetDeck?.name || 'deck';
-    showToast(`✓ ${card.card_name} added to ${deckName}`, 'success');
+    showToast(`✓ ${card.card_name} added to ${targetDeck?.name || 'deck'}`, 'success');
     if (navigator.vibrate) navigator.vibrate(50);
     setResult(null);
     return true;
@@ -242,21 +239,39 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ background: '#000' }}>
 
-      {/* ── LIVE SCAN ── */}
-      {mode === 'Live Scan' && (
+      {/* ── SCAN MODE ── */}
+      {mode === 'Scan' && (
         <>
           <video ref={videoRef} playsInline muted autoPlay className="absolute inset-0 w-full h-full object-cover" />
           <canvas ref={canvasRef} className="hidden" />
+
+          {/* Hidden gallery input */}
+          <input
+            ref={galleryInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handleGalleryUpload}
+            className="hidden"
+          />
 
           {cameraError && (
             <div className="absolute inset-0 flex items-center justify-center p-6" style={{ background: '#0a0e1a' }}>
               <div className="text-center">
                 <div className="text-5xl mb-4">📷</div>
                 <p className="text-white font-semibold mb-2">Camera needed</p>
-                <p className="text-slate-400 text-sm mb-4">{cameraError}</p>
-                <button onClick={startCamera} className="rounded-xl px-6 py-3 text-sm font-semibold" style={{ background: '#f59e0b', color: '#0a0e1a' }}>
-                  Try Again
-                </button>
+                <p className="text-slate-400 text-sm mb-5">{cameraError}</p>
+                <div className="flex flex-col gap-3">
+                  <button onClick={startCamera} className="rounded-xl px-6 py-3 text-sm font-semibold" style={{ background: '#f59e0b', color: '#0a0e1a' }}>
+                    Try Camera Again
+                  </button>
+                  <label
+                    className="rounded-xl px-6 py-3 text-sm font-semibold text-center cursor-pointer"
+                    style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#f1f5f9' }}
+                  >
+                    🖼️ Upload from Gallery
+                    <input type="file" accept="image/*" onChange={handleGalleryUpload} disabled={scanning} className="hidden" />
+                  </label>
+                </div>
               </div>
             </div>
           )}
@@ -270,7 +285,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
             </div>
           )}
 
-          {/* Scan frame */}
+          {/* Viewfinder frame */}
           {!cameraError && isOnline && (
             <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
               <div
@@ -283,59 +298,67 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
                   transition: 'all 0.25s',
                 }}
               />
-              <p className="text-xs mt-3 font-medium" style={{ color: 'rgba(245,158,11,0.8)' }}>
-                {scanning ? 'Identifying…' : 'Point at card then tap button below'}
+              <p className="text-xs mt-3 font-medium" style={{ color: 'rgba(245,158,11,0.85)' }}>
+                {scanning ? 'Identifying card…' : 'Frame the card name, then tap Scan'}
               </p>
             </div>
           )}
 
-          {/* TAP TO SCAN button */}
+          {/* Bottom action bar: Gallery icon + Scan button */}
           {!cameraError && isOnline && !result && (
-            <button
-              onPointerDown={handleTapScan}
-              disabled={scanning || scanCount >= scanLimit || !cameraReady}
-              className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full px-7 py-4 font-bold text-sm disabled:opacity-50 transition-all active:scale-95"
-              style={{
-                background: scanning ? 'rgba(245,158,11,0.5)' : '#f59e0b',
-                color: '#0a0e1a',
-                minWidth: 160,
-                justifyContent: 'center',
-                boxShadow: '0 4px 20px rgba(245,158,11,0.4)',
-              }}
-            >
-              {scanning ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                  Scanning…
-                </>
-              ) : (
-                '⚡ Scan Card'
-              )}
-            </button>
+            <div className="absolute bottom-6 left-0 right-0 flex items-center justify-center gap-4 px-6">
+              {/* Gallery upload button */}
+              <label
+                className="flex items-center justify-center rounded-full cursor-pointer transition-all active:scale-95"
+                style={{
+                  width: 52,
+                  height: 52,
+                  background: 'rgba(17,24,39,0.92)',
+                  border: '1px solid rgba(245,158,11,0.4)',
+                  fontSize: 22,
+                  flexShrink: 0,
+                }}
+                title="Upload from gallery"
+              >
+                🖼️
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleGalleryUpload}
+                  disabled={scanning}
+                  className="hidden"
+                />
+              </label>
+
+              {/* Tap to scan */}
+              <button
+                onPointerDown={handleTapScan}
+                disabled={scanning || scanCount >= scanLimit || !cameraReady}
+                className="flex items-center gap-2 rounded-full px-8 py-4 font-bold text-sm disabled:opacity-50 transition-all active:scale-95"
+                style={{
+                  background: scanning ? 'rgba(245,158,11,0.5)' : '#f59e0b',
+                  color: '#0a0e1a',
+                  minWidth: 170,
+                  justifyContent: 'center',
+                  boxShadow: '0 4px 20px rgba(245,158,11,0.4)',
+                  flexShrink: 0,
+                }}
+              >
+                {scanning ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                    Scanning…
+                  </>
+                ) : (
+                  '⚡ Scan Card'
+                )}
+              </button>
+            </div>
           )}
         </>
       )}
 
-      {/* ── PHOTO ── */}
-      {mode === 'Photo' && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-8" style={{ background: '#0a0e1a' }}>
-          <div className="text-6xl mb-6">🖼️</div>
-          <p className="text-slate-400 text-sm mb-6 text-center">Select a photo of a Magic card to identify it</p>
-          <label
-            className="w-full max-w-xs flex items-center justify-center gap-3 rounded-xl py-4 px-6 font-semibold cursor-pointer active:scale-95 transition-all"
-            style={{ background: '#f59e0b', color: '#0a0e1a', minHeight: 52 }}
-          >
-            {scanning ? (
-              <><div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" /> Identifying…</>
-            ) : (
-              '📷 Choose Photo'
-            )}
-            <input type="file" accept="image/*" capture="environment" onChange={handlePhotoUpload} disabled={scanning} className="hidden" />
-          </label>
-        </div>
-      )}
-
-      {/* ── SEARCH ── */}
+      {/* ── SEARCH MODE ── */}
       {mode === 'Search' && (
         <div className="absolute inset-0 p-4 pt-24 overflow-y-auto" style={{ background: '#0a0e1a' }}>
           <div className="relative">
@@ -368,10 +391,10 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
         </div>
       )}
 
-      {/* ── TOP BAR: Deck picker + mode toggle ── */}
+      {/* ── TOP BAR ── */}
       <div
         className="absolute top-0 left-0 right-0 px-4 pt-4 pb-2 z-10"
-        style={{ background: mode === 'Live Scan' ? 'linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, transparent 100%)' : 'transparent' }}
+        style={{ background: mode === 'Scan' ? 'linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, transparent 100%)' : 'transparent' }}
       >
         {/* Deck selector */}
         <div className="flex items-center justify-between mb-3">
@@ -420,13 +443,13 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
             <button key={m} onClick={() => { setMode(m); setResult(null); setSuggestions([]); setSearchQuery(''); }}
               className="flex-1 py-2 text-xs font-semibold rounded-lg transition-all"
               style={{ background: mode === m ? '#f59e0b' : 'transparent', color: mode === m ? '#0a0e1a' : '#94a3b8', minHeight: 36 }}>
-              {m}
+              {m === 'Scan' ? '📷 Scan' : '🔍 Search'}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Scan limit warning */}
+      {/* Scan limit overlay (Pro upsell) */}
       {tier === 'free' && scanCount >= scanLimit && (
         <div className="absolute inset-0 flex items-center justify-center p-6 bg-black/70 z-20">
           <div className="rounded-2xl p-6 text-center max-w-xs" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
@@ -451,14 +474,14 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
         />
       )}
 
-      {/* New deck creation form */}
+      {/* New deck form */}
       {showNewDeckForm && (
         <div className="absolute inset-0 flex items-end z-30" style={{ background: 'rgba(0,0,0,0.7)' }}
           onClick={(e) => { if (e.target === e.currentTarget) setShowNewDeckForm(false); }}>
           <div className="w-full rounded-t-2xl px-4 pt-4 pb-8" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
             <div className="flex justify-center mb-4"><div className="w-10 h-1 rounded-full" style={{ background: '#1e2d47' }} /></div>
             <h2 className="text-lg font-bold text-white mb-1">Name Your New Deck</h2>
-            <p className="text-slate-400 text-sm mb-4">The scanned card will be added automatically.</p>
+            <p className="text-slate-400 text-sm mb-4">The card will be added automatically once created.</p>
             <form onSubmit={handleNewDeckSubmit} className="space-y-4">
               <input type="text" value={newDeckName} onChange={(e) => setNewDeckName(e.target.value)}
                 placeholder="e.g. Atraxa Superfriends" required autoFocus

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient, createServiceClient } from '@/lib/supabase/server';
 import { fetchCardByName } from '@/lib/scryfall';
 import { checkScanLimit, incrementScanCount } from '@/lib/usage';
-import { GoogleGenAI } from '@google/genai';
+import Anthropic from '@anthropic-ai/sdk';
 
 export async function POST(request) {
   try {
@@ -44,35 +44,44 @@ export async function POST(request) {
     const base64 = Buffer.from(arrayBuffer).toString('base64');
     const mimeType = imageFile.type || 'image/jpeg';
 
-    // Call Gemini 2.0 Flash
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    // Use Claude vision to identify the card (no Google billing required)
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const prompt =
-      "You are identifying Magic: The Gathering cards. Look at this image and identify the card name exactly as printed on the card. Reply with ONLY the card name, nothing else. If you cannot identify a card, reply with 'UNKNOWN'.";
-
-    const result = await ai.models.generateContent({
-      model: 'gemini-1.5-flash',
-      contents: [
+    const message = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 60,
+      messages: [
         {
-          parts: [
-            { text: prompt },
-            { inlineData: { mimeType, data: base64 } },
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: mimeType,
+                data: base64,
+              },
+            },
+            {
+              type: 'text',
+              text: 'This is a Magic: The Gathering card. What is the exact card name printed at the top of the card? Reply with ONLY the card name — no punctuation, no explanations. If you cannot clearly see a card name, reply with UNKNOWN.',
+            },
           ],
         },
       ],
     });
 
-    const cardName = result.text.trim();
+    const cardName = message.content[0].text.trim();
 
-    if (!cardName || cardName === 'UNKNOWN' || cardName.toLowerCase() === 'unknown') {
-      return NextResponse.json({ error: 'Card not recognized' }, { status: 404 });
+    if (!cardName || cardName.toUpperCase() === 'UNKNOWN') {
+      return NextResponse.json({ error: 'Card not recognized — try better lighting or hold the card steady' }, { status: 404 });
     }
 
-    // Check card cache first
+    // Check card cache first (case-insensitive match)
     const { data: cached } = await serviceClient
       .from('card_cache')
       .select('*')
-      .eq('card_name', cardName)
+      .ilike('card_name', cardName)
       .gt('expires_at', new Date().toISOString())
       .maybeSingle();
 
@@ -82,7 +91,7 @@ export async function POST(request) {
       // Fetch from Scryfall
       const scryfallCard = await fetchCardByName(cardName);
       if (!scryfallCard) {
-        return NextResponse.json({ error: 'Card not found in database' }, { status: 404 });
+        return NextResponse.json({ error: `"${cardName}" not found — try scanning again` }, { status: 404 });
       }
 
       // Cache to database
