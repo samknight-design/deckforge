@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient, createServiceClient } from '@/lib/supabase/server';
 import { fetchCardByName } from '@/lib/scryfall';
 import { checkScanLimit, incrementScanCount } from '@/lib/usage';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 export async function POST(request) {
   try {
@@ -45,23 +45,24 @@ export async function POST(request) {
     const mimeType = imageFile.type || 'image/jpeg';
 
     // Call Gemini 2.0 Flash
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
     const prompt =
-      'You are identifying Magic: The Gathering cards. Look at this image and identify the card name exactly as printed on the card. Reply with ONLY the card name, nothing else. If you cannot identify a card, reply with \'UNKNOWN\'.';
+      "You are identifying Magic: The Gathering cards. Look at this image and identify the card name exactly as printed on the card. Reply with ONLY the card name, nothing else. If you cannot identify a card, reply with 'UNKNOWN'.";
 
-    const result = await model.generateContent([
-      prompt,
-      {
-        inlineData: {
-          data: base64,
-          mimeType,
+    const result = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            { inlineData: { mimeType, data: base64 } },
+          ],
         },
-      },
-    ]);
+      ],
+    });
 
-    const cardName = result.response.text().trim();
+    const cardName = result.text.trim();
 
     if (!cardName || cardName === 'UNKNOWN' || cardName.toLowerCase() === 'unknown') {
       return NextResponse.json({ error: 'Card not recognized' }, { status: 404 });
