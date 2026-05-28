@@ -4,9 +4,11 @@ import { useState } from 'react';
 import Image from 'next/image';
 import { ManaCostDisplay, ColourPips } from './ColourPip';
 
+const NEW_DECK = '__new__';
+
 export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDismiss }) {
-  // activeDeckId may be null (when 'New Deck' is selected in scanner) — fall back to first real deck
-  const [selectedDeckId, setSelectedDeckId] = useState(activeDeckId || decks[0]?.id || null);
+  // If activeDeckId is null (scanner had "New Deck" selected) or no decks exist, pre-select __new__
+  const [selectedDeckId, setSelectedDeckId] = useState(activeDeckId || decks[0]?.id || NEW_DECK);
   const [adding, setAdding] = useState(false);
 
   const handleAdd = async () => {
@@ -81,26 +83,25 @@ export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDi
           </div>
 
           {/* Deck selector */}
-          {decks.length > 0 && (
-            <div className="mt-4">
-              <label className="text-xs text-text-secondary mb-1 block">Add to deck</label>
-              <select
-                value={selectedDeckId || ''}
-                onChange={(e) => setSelectedDeckId(e.target.value)}
-                className="w-full rounded-xl px-4 py-3 text-sm appearance-none"
-                style={{
-                  background: '#1a2235',
-                  border: '1px solid #1e2d47',
-                  color: '#f1f5f9',
-                  minHeight: 44,
-                }}
-              >
-                {decks.map((d) => (
-                  <option key={d.id} value={d.id}>{d.name}</option>
-                ))}
-              </select>
-            </div>
-          )}
+          <div className="mt-4">
+            <label className="text-xs text-text-secondary mb-1 block">Add to deck</label>
+            <select
+              value={selectedDeckId || ''}
+              onChange={(e) => setSelectedDeckId(e.target.value)}
+              className="w-full rounded-xl px-4 py-3 text-sm appearance-none"
+              style={{
+                background: '#1a2235',
+                border: '1px solid #1e2d47',
+                color: '#f1f5f9',
+                minHeight: 44,
+              }}
+            >
+              <option value={NEW_DECK}>✨ Create New Deck</option>
+              {decks.map((d) => (
+                <option key={d.id} value={d.id}>{d.name}</option>
+              ))}
+            </select>
+          </div>
 
           {/* Action buttons */}
           <div className="flex gap-3 mt-4">
@@ -116,35 +117,21 @@ export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDi
             >
               Dismiss
             </button>
-            {decks.length > 0 && selectedDeckId ? (
-              <button
-                onClick={handleAdd}
-                disabled={adding}
-                className="flex-2 rounded-xl py-3 px-6 text-sm font-semibold disabled:opacity-60"
-                style={{
-                  background: '#f59e0b',
-                  color: '#0a0e1a',
-                  minHeight: 44,
-                  flex: 2,
-                }}
-              >
-                {adding ? 'Adding…' : `Add to Deck`}
-              </button>
-            ) : (
-              <button
-                onClick={() => window.location.href = '/decks'}
-                className="flex-2 rounded-xl py-3 px-4 text-sm font-semibold"
-                style={{
-                  background: '#1a2235',
-                  border: '1px solid #f59e0b',
-                  color: '#f59e0b',
-                  minHeight: 44,
-                  flex: 2,
-                }}
-              >
-                Create Deck First
-              </button>
-            )}
+            <button
+              onClick={handleAdd}
+              disabled={adding}
+              className="flex-2 rounded-xl py-3 px-6 text-sm font-semibold disabled:opacity-60"
+              style={{
+                background: selectedDeckId === NEW_DECK
+                  ? 'linear-gradient(135deg, #7c3aed, #f59e0b)'
+                  : '#f59e0b',
+                color: selectedDeckId === NEW_DECK ? '#fff' : '#0a0e1a',
+                minHeight: 44,
+                flex: 2,
+              }}
+            >
+              {adding ? 'Adding…' : selectedDeckId === NEW_DECK ? '✨ Create & Add' : 'Add to Deck'}
+            </button>
           </div>
         </div>
       </div>

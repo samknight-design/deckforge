@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 
@@ -109,7 +109,7 @@ function OrDivider() {
 
 // ─── Main page ─────────────────────────────────────────────────────────────
 
-export default function LoginPage() {
+function LoginPageInner() {
   const [view, setView] = useState('login'); // login | signup | forgot | sent | verify | magic | magic_sent
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -351,5 +351,22 @@ export default function LoginPage() {
         </button>
       </div>
     </PageShell>
+  );
+}
+
+// useSearchParams() requires a Suspense boundary in Next.js 14 App Router
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <div
+        className="min-h-screen flex flex-col items-center justify-center px-6 py-12"
+        style={{ background: 'linear-gradient(180deg, #0a0e1a 0%, #111827 100%)' }}
+      >
+        <div className="text-5xl mb-3">⚔️</div>
+        <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mt-4" />
+      </div>
+    }>
+      <LoginPageInner />
+    </Suspense>
   );
 }
