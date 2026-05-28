@@ -5,17 +5,6 @@ import { usePathname } from 'next/navigation';
 
 const tabs = [
   {
-    href: '/scan',
-    label: 'Scan',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={active ? '#f59e0b' : '#94a3b8'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2"/>
-        <path d="M9 9h6v6H9z"/>
-        <path d="M3 9h2M3 15h2M19 9h2M19 15h2M9 3v2M15 3v2M9 19v2M15 19v2"/>
-      </svg>
-    ),
-  },
-  {
     href: '/decks',
     label: 'My Decks',
     icon: (active) => (
@@ -23,6 +12,17 @@ const tabs = [
         <rect x="2" y="4" width="15" height="18" rx="2"/>
         <path d="M7 2h14a1 1 0 0 1 1 1v16"/>
         <path d="M6 9h7M6 13h5M6 17h4"/>
+      </svg>
+    ),
+  },
+  {
+    href: '/scan',
+    label: 'Scan',
+    icon: (active) => (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={active ? '#f59e0b' : '#94a3b8'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2"/>
+        <path d="M9 9h6v6H9z"/>
+        <path d="M3 9h2M3 15h2M19 9h2M19 15h2M9 3v2M15 3v2M9 19v2M15 19v2"/>
       </svg>
     ),
   },

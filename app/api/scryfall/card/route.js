@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { fetchCardByName, fetchCardById } from '@/lib/scryfall';
 
+export const runtime = 'edge';
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const name = searchParams.get('name');

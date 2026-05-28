@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { searchCards } from '@/lib/scryfall';
 
+export const runtime = 'edge';
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const q = searchParams.get('q') || '';

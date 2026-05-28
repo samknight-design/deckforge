@@ -18,35 +18,28 @@ export async function POST(request) {
       return NextResponse.json({ error: 'deckId required' }, { status: 400 });
     }
 
-    // Get profile for tier check
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('tier')
-      .eq('id', user.id)
-      .single();
+    // Fetch profile, deck, and deck_cards all at once
+    const [profileResult, deckResult, deckCardsResult] = await Promise.all([
+      supabase.from('profiles').select('tier').eq('id', user.id).single(),
+      supabase.from('decks').select('*').eq('id', deckId).eq('user_id', user.id).single(),
+      supabase.from('deck_cards')
+        .select('id, scryfall_id, card_name, quantity, is_commander, is_partner')
+        .eq('deck_id', deckId),
+    ]);
 
-    const limitCheck = await checkInsightLimit(supabase, user.id, profile?.tier || 'free');
+    const limitCheck = await checkInsightLimit(supabase, user.id, profileResult.data?.tier || 'free');
     if (!limitCheck.allowed) {
       return NextResponse.json({ error: 'AI Insights require a Pro subscription.' }, { status: 403 });
     }
 
-    // Fetch deck
-    const { data: deck, error: deckError } = await supabase
-      .from('decks')
-      .select('*')
-      .eq('id', deckId)
-      .eq('user_id', user.id)
-      .single();
+    const deck = deckResult.data;
+    const deckError = deckResult.error;
 
     if (deckError || !deck) {
       return NextResponse.json({ error: 'Deck not found' }, { status: 404 });
     }
 
-    // Fetch deck_cards (no embedded join — no FK exists from scryfall_id to card_cache)
-    const { data: deckCards } = await supabase
-      .from('deck_cards')
-      .select('id, scryfall_id, card_name, quantity, is_commander, is_partner')
-      .eq('deck_id', deckId);
+    const deckCards = deckCardsResult.data;
 
     if (!deckCards || deckCards.length === 0) {
       return NextResponse.json({ error: 'Deck has no cards' }, { status: 400 });

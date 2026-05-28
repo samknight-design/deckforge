@@ -7,20 +7,30 @@ import Anthropic from '@anthropic-ai/sdk';
 export async function POST(request) {
   try {
     const supabase = createClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
 
+    // Round 1: auth check + form parse in parallel
+    const [authResult, formData] = await Promise.all([
+      supabase.auth.getUser(),
+      request.formData(),
+    ]);
+
+    const { data: { user }, error: authError } = authResult;
     if (authError || !user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Get user profile for tier
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('tier')
-      .eq('id', user.id)
-      .single();
+    const imageFile = formData.get('image');
+    if (!imageFile) {
+      return NextResponse.json({ error: 'No image provided' }, { status: 400 });
+    }
 
-    const tier = profile?.tier || 'free';
+    // Round 2: profile + image buffer in parallel
+    const [profileResult, arrayBuffer] = await Promise.all([
+      supabase.from('profiles').select('tier').eq('id', user.id).single(),
+      imageFile.arrayBuffer(),
+    ]);
+
+    const tier = profileResult.data?.tier || 'free';
 
     // Check scan limit
     const serviceClient = createServiceClient();
@@ -32,19 +42,17 @@ export async function POST(request) {
       );
     }
 
-    const formData = await request.formData();
-    const imageFile = formData.get('image');
-
-    if (!imageFile) {
-      return NextResponse.json({ error: 'No image provided' }, { status: 400 });
+    // Convert image to base64 (Web API — works everywhere)
+    const uint8Array = new Uint8Array(arrayBuffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < uint8Array.length; i += chunkSize) {
+      binary += String.fromCharCode(...uint8Array.subarray(i, i + chunkSize));
     }
-
-    // Convert image to base64
-    const arrayBuffer = await imageFile.arrayBuffer();
-    const base64 = Buffer.from(arrayBuffer).toString('base64');
+    const base64 = btoa(binary);
     const mimeType = imageFile.type || 'image/jpeg';
 
-    // Use Claude vision to identify the card (no Google billing required)
+    // Claude vision identifies the card
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const message = await anthropic.messages.create({
@@ -56,11 +64,7 @@ export async function POST(request) {
           content: [
             {
               type: 'image',
-              source: {
-                type: 'base64',
-                media_type: mimeType,
-                data: base64,
-              },
+              source: { type: 'base64', media_type: mimeType, data: base64 },
             },
             {
               type: 'text',
@@ -74,36 +78,41 @@ export async function POST(request) {
     const cardName = message.content[0].text.trim();
 
     if (!cardName || cardName.toUpperCase() === 'UNKNOWN') {
-      return NextResponse.json({ error: 'Card not recognized — try better lighting or hold the card steady' }, { status: 404 });
+      return NextResponse.json(
+        { error: 'Card not recognized — try better lighting or hold the card steady' },
+        { status: 404 }
+      );
     }
 
-    // Check card cache first (case-insensitive match)
-    const { data: cached } = await serviceClient
-      .from('card_cache')
-      .select('*')
-      .ilike('card_name', cardName)
-      .gt('expires_at', new Date().toISOString())
-      .maybeSingle();
+    // Round 3: cache lookup + usage increment can happen together after Anthropic responds
+    const [cachedResult] = await Promise.all([
+      serviceClient
+        .from('card_cache')
+        .select('*')
+        .ilike('card_name', cardName)
+        .gt('expires_at', new Date().toISOString())
+        .maybeSingle(),
+    ]);
 
-    let card = cached;
+    let card = cachedResult.data;
 
     if (!card) {
-      // Fetch from Scryfall
       const scryfallCard = await fetchCardByName(cardName);
       if (!scryfallCard) {
-        return NextResponse.json({ error: `"${cardName}" not found — try scanning again` }, { status: 404 });
+        return NextResponse.json(
+          { error: `"${cardName}" not found — try scanning again` },
+          { status: 404 }
+        );
       }
-
-      // Cache to database
-      await serviceClient.from('card_cache').upsert(scryfallCard, {
-        onConflict: 'scryfall_id',
-      });
-
+      // Cache write + usage increment in parallel
+      await Promise.all([
+        serviceClient.from('card_cache').upsert(scryfallCard, { onConflict: 'scryfall_id' }),
+        incrementScanCount(serviceClient, user.id),
+      ]);
       card = scryfallCard;
+    } else {
+      await incrementScanCount(serviceClient, user.id);
     }
-
-    // Increment usage
-    await incrementScanCount(serviceClient, user.id);
 
     return NextResponse.json({
       card: {
