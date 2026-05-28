@@ -8,6 +8,6 @@ export default async function RootPage() {
   if (user) {
     redirect('/decks');
   } else {
-    redirect('/login');
+    redirect('/welcome');
   }
 }

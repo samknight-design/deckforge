@@ -1,63 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 
-// ── tiny inner components ──────────────────────────────────────────────────
-
-function SocialBtn({ provider, icon, label, active, onClick }) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={!!active}
-      className="w-full flex items-center justify-center gap-3 rounded-xl py-3 px-4 font-medium text-sm transition-all disabled:opacity-60 active:scale-95"
-      style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 44 }}
-    >
-      {active === provider ? <span className="animate-spin">⟳</span> : icon}
-      {label}
-    </button>
-  );
-}
-
-function Field({ type, value, onChange, placeholder, autoComplete }) {
-  return (
-    <input
-      type={type}
-      value={value}
-      onChange={onChange}
-      placeholder={placeholder}
-      required
-      autoComplete={autoComplete}
-      className="w-full rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 ring-gold transition-all"
-      style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 44 }}
-    />
-  );
-}
-
-function SubmitBtn({ loading, label, loadingLabel }) {
-  return (
-    <button
-      type="submit"
-      disabled={loading}
-      className="w-full rounded-xl py-3 px-4 font-semibold text-sm transition-all disabled:opacity-50 active:scale-95"
-      style={{ background: '#f59e0b', color: '#0a0e1a', minHeight: 44 }}
-    >
-      {loading ? loadingLabel : label}
-    </button>
-  );
-}
-
-function Divider() {
-  return (
-    <div className="flex items-center gap-3 my-5">
-      <div className="flex-1 h-px" style={{ background: '#1e2d47' }} />
-      <span className="text-xs" style={{ color: '#4b5a72' }}>or</span>
-      <div className="flex-1 h-px" style={{ background: '#1e2d47' }} />
-    </div>
-  );
-}
-
-// ── icons ─────────────────────────────────────────────────────────────────
+// ─── Icons (module-level, never remount) ───────────────────────────────────
 
 const GoogleIcon = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
@@ -80,7 +27,87 @@ const AppleIcon = (
   </svg>
 );
 
-// ── main page ─────────────────────────────────────────────────────────────
+// ─── Reusable primitives (module-level — NEVER define these inside a component) ──
+
+function PageShell({ children }) {
+  return (
+    <div
+      className="min-h-screen flex flex-col items-center justify-center px-6 py-12"
+      style={{ background: 'linear-gradient(180deg, #0a0e1a 0%, #111827 100%)' }}
+    >
+      <div className="mb-8 text-center">
+        <div className="text-5xl mb-3">⚔️</div>
+        <h1 className="text-2xl font-bold" style={{ color: '#f1f5f9' }}>DeckForge</h1>
+        <p className="mt-1 text-sm" style={{ color: '#64748b' }}>Your MTG companion</p>
+      </div>
+      <div
+        className="w-full max-w-sm rounded-2xl p-6"
+        style={{ background: '#111827', border: '1px solid #1e2d47' }}
+      >
+        {children}
+      </div>
+      <p className="mt-6 text-xs text-center max-w-xs" style={{ color: '#374151' }}>
+        By continuing you agree to our Terms of Service and Privacy Policy.
+      </p>
+    </div>
+  );
+}
+
+function InputField({ type, value, onChange, placeholder, autoComplete }) {
+  return (
+    <input
+      type={type}
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      required
+      autoComplete={autoComplete}
+      className="w-full rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 ring-amber-400 transition-all"
+      style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 44 }}
+    />
+  );
+}
+
+function PrimaryButton({ type = 'button', disabled, onClick, children }) {
+  return (
+    <button
+      type={type}
+      disabled={disabled}
+      onClick={onClick}
+      className="w-full rounded-xl py-3 px-4 font-semibold text-sm transition-all disabled:opacity-50 active:scale-95"
+      style={{ background: '#f59e0b', color: '#0a0e1a', minHeight: 44 }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SocialButton({ provider, icon, label, active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!!active}
+      className="w-full flex items-center justify-center gap-3 rounded-xl py-3 px-4 font-medium text-sm transition-all disabled:opacity-60 active:scale-95"
+      style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 44 }}
+    >
+      {active === provider ? <span className="animate-spin">⟳</span> : icon}
+      {label}
+    </button>
+  );
+}
+
+function OrDivider() {
+  return (
+    <div className="flex items-center gap-3 my-5">
+      <div className="flex-1 h-px" style={{ background: '#1e2d47' }} />
+      <span className="text-xs" style={{ color: '#374151' }}>or</span>
+      <div className="flex-1 h-px" style={{ background: '#1e2d47' }} />
+    </div>
+  );
+}
+
+// ─── Main page ─────────────────────────────────────────────────────────────
 
 export default function LoginPage() {
   const [view, setView] = useState('login'); // login | signup | forgot | sent | verify | magic | magic_sent
@@ -88,28 +115,47 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [oauthLoading, setOauthLoading] = useState(null); // 'google' | 'discord' | 'apple'
+  const [oauthLoading, setOauthLoading] = useState(null);
   const [error, setError] = useState('');
+  const [isConverting, setIsConverting] = useState(false); // anonymous → real account
 
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = createClient();
+
   const siteUrl =
     process.env.NEXT_PUBLIC_SITE_URL ||
     (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
 
+  // Detect if this is an anonymous user converting to a real account
+  useEffect(() => {
+    const convert = searchParams?.get('convert');
+    if (convert === 'true') {
+      setIsConverting(true);
+      setView('signup'); // Start on sign-up view for conversion
+    }
+  }, [searchParams]);
+
   const go = (v) => { setError(''); setView(v); };
 
-  // ── OAuth ──
+  // ── OAuth / Link identity ──
   const handleOAuth = async (provider) => {
     setOauthLoading(provider);
     setError('');
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider,
-      options: { redirectTo: `${siteUrl}/auth/callback` },
-    });
-    if (error) { setError(error.message); setOauthLoading(null); }
+    if (isConverting) {
+      // Link OAuth to existing anonymous session (preserves their decks)
+      const { error } = await supabase.auth.linkIdentity({ provider, options: { redirectTo: `${siteUrl}/auth/callback` } });
+      if (error) { setError(error.message); setOauthLoading(null); }
+    } else {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: `${siteUrl}/auth/callback` },
+      });
+      if (error) { setError(error.message); setOauthLoading(null); }
+    }
   };
 
-  // ── Email + Password sign-in ──
+  // ── Email sign-in ──
   const handleSignIn = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -119,19 +165,26 @@ export default function LoginPage() {
     setLoading(false);
   };
 
-  // ── Email + Password sign-up ──
+  // ── Email sign-up (also handles anon → real conversion) ──
   const handleSignUp = async (e) => {
     e.preventDefault();
     if (password !== confirmPassword) { setError('Passwords do not match'); return; }
     if (password.length < 6) { setError('Password must be at least 6 characters'); return; }
     setLoading(true);
     setError('');
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { emailRedirectTo: `${siteUrl}/auth/callback` },
-    });
-    if (error) { setError(error.message); } else { go('verify'); }
+
+    if (isConverting) {
+      // updateUser keeps the same user_id → decks are preserved
+      const { error } = await supabase.auth.updateUser({ email, password });
+      if (error) { setError(error.message); setLoading(false); return; }
+      go('verify');
+    } else {
+      const { error } = await supabase.auth.signUp({
+        email, password,
+        options: { emailRedirectTo: `${siteUrl}/auth/callback` },
+      });
+      if (error) { setError(error.message); } else { go('verify'); }
+    }
     setLoading(false);
   };
 
@@ -153,192 +206,150 @@ export default function LoginPage() {
     setLoading(true);
     setError('');
     const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: `${siteUrl}/auth/callback` },
+      email, options: { emailRedirectTo: `${siteUrl}/auth/callback` },
     });
     if (error) { setError(error.message); } else { go('magic_sent'); }
     setLoading(false);
   };
 
-  // ── shared social buttons ──
-  const SocialButtons = () => (
+  // ── Social buttons block ──
+  const socialBlock = (
     <div className="space-y-2">
-      <SocialBtn provider="google"  icon={GoogleIcon}  label="Continue with Google"  active={oauthLoading} onClick={() => handleOAuth('google')} />
-      <SocialBtn provider="discord" icon={DiscordIcon} label="Continue with Discord" active={oauthLoading} onClick={() => handleOAuth('discord')} />
-      <SocialBtn provider="apple"   icon={AppleIcon}   label="Continue with Apple"   active={oauthLoading} onClick={() => handleOAuth('apple')} />
+      <SocialButton provider="google"  icon={GoogleIcon}  label="Continue with Google"  active={oauthLoading} onClick={() => handleOAuth('google')} />
+      <SocialButton provider="discord" icon={DiscordIcon} label="Continue with Discord" active={oauthLoading} onClick={() => handleOAuth('discord')} />
+      <SocialButton provider="apple"   icon={AppleIcon}   label="Continue with Apple"   active={oauthLoading} onClick={() => handleOAuth('apple')} />
     </div>
   );
 
-  // ── page shell ──
-  const Shell = ({ children }) => (
-    <div
-      className="min-h-screen flex flex-col items-center justify-center px-6 py-12"
-      style={{ background: 'linear-gradient(180deg, #0a0e1a 0%, #111827 100%)' }}
-    >
-      <div className="mb-8 text-center">
-        <div className="text-5xl mb-3">⚔️</div>
-        <h1 className="text-2xl font-bold text-text-primary">DeckForge</h1>
-        <p className="text-text-secondary mt-1 text-sm">Your MTG companion</p>
-      </div>
-      <div className="w-full max-w-sm rounded-2xl p-6" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
-        {children}
-      </div>
-      <p className="mt-6 text-xs text-center max-w-xs" style={{ color: '#4b5a72' }}>
-        By continuing you agree to our Terms of Service and Privacy Policy.
-      </p>
-    </div>
-  );
+  // ─── Views ───────────────────────────────────────────────────────────────
 
-  // ── sent (password reset) ──
   if (view === 'sent') return (
-    <Shell>
+    <PageShell>
       <div className="text-center py-2">
         <div className="text-4xl mb-4">📧</div>
-        <h2 className="text-lg font-semibold text-text-primary mb-2">Check your email</h2>
+        <h2 className="text-lg font-semibold mb-2" style={{ color: '#f1f5f9' }}>Check your email</h2>
         <p className="text-sm mb-4" style={{ color: '#94a3b8' }}>
-          A password reset link was sent to <strong className="text-text-primary">{email}</strong>
+          A password reset link was sent to <strong style={{ color: '#f1f5f9' }}>{email}</strong>
         </p>
-        <button onClick={() => go('login')} className="text-sm underline" style={{ color: '#f59e0b' }}>
-          Back to sign in
-        </button>
+        <button onClick={() => go('login')} className="text-sm underline" style={{ color: '#f59e0b' }}>Back to sign in</button>
       </div>
-    </Shell>
+    </PageShell>
   );
 
-  // ── verify (after sign-up) ──
   if (view === 'verify') return (
-    <Shell>
+    <PageShell>
       <div className="text-center py-2">
         <div className="text-4xl mb-4">✉️</div>
-        <h2 className="text-lg font-semibold text-text-primary mb-2">Verify your email</h2>
+        <h2 className="text-lg font-semibold mb-2" style={{ color: '#f1f5f9' }}>
+          {isConverting ? 'Confirm your email' : 'Verify your email'}
+        </h2>
         <p className="text-sm mb-4" style={{ color: '#94a3b8' }}>
-          A confirmation link was sent to <strong className="text-text-primary">{email}</strong>. Click it to activate your account.
+          {isConverting
+            ? <>A confirmation link was sent to <strong style={{ color: '#f1f5f9' }}>{email}</strong>. Click it to save your account — your decks will be kept.</>
+            : <>A confirmation link was sent to <strong style={{ color: '#f1f5f9' }}>{email}</strong>. Click it to activate your account.</>
+          }
         </p>
-        <button onClick={() => go('login')} className="text-sm underline" style={{ color: '#f59e0b' }}>
-          Back to sign in
+        <button onClick={() => router.push('/decks')} className="text-sm underline" style={{ color: '#f59e0b' }}>
+          {isConverting ? 'Back to my decks' : 'Back to sign in'}
         </button>
       </div>
-    </Shell>
+    </PageShell>
   );
 
-  // ── magic link sent ──
   if (view === 'magic_sent') return (
-    <Shell>
+    <PageShell>
       <div className="text-center py-2">
         <div className="text-4xl mb-4">🔮</div>
-        <h2 className="text-lg font-semibold text-text-primary mb-2">Magic link sent</h2>
+        <h2 className="text-lg font-semibold mb-2" style={{ color: '#f1f5f9' }}>Magic link sent</h2>
         <p className="text-sm mb-4" style={{ color: '#94a3b8' }}>
-          Check <strong className="text-text-primary">{email}</strong> for your sign-in link.
+          Check <strong style={{ color: '#f1f5f9' }}>{email}</strong> for your sign-in link.
         </p>
-        <button onClick={() => go('login')} className="text-sm underline" style={{ color: '#f59e0b' }}>
-          Back to sign in
-        </button>
+        <button onClick={() => go('login')} className="text-sm underline" style={{ color: '#f59e0b' }}>Back to sign in</button>
       </div>
-    </Shell>
+    </PageShell>
   );
 
-  // ── forgot password ──
   if (view === 'forgot') return (
-    <Shell>
-      <button onClick={() => go('login')} className="flex items-center gap-1 text-sm mb-5 transition-colors hover:text-text-secondary" style={{ color: '#4b5a72' }}>
-        ← Back
-      </button>
-      <h2 className="text-lg font-semibold text-text-primary mb-1">Reset password</h2>
+    <PageShell>
+      <button onClick={() => go('login')} className="flex items-center gap-1 text-sm mb-5 transition-colors" style={{ color: '#64748b' }}>← Back</button>
+      <h2 className="text-lg font-semibold mb-1" style={{ color: '#f1f5f9' }}>Reset password</h2>
       <p className="text-sm mb-5" style={{ color: '#94a3b8' }}>Enter your email and we'll send a reset link.</p>
       <form onSubmit={handleForgotPassword} className="space-y-3">
-        <Field type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email address" autoComplete="email" />
-        <SubmitBtn loading={loading} label="Send Reset Link" loadingLabel="Sending…" />
+        <InputField type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email address" autoComplete="email" />
+        <PrimaryButton type="submit" disabled={loading || !email}>{loading ? 'Sending…' : 'Send Reset Link'}</PrimaryButton>
       </form>
       {error && <p className="mt-4 text-center text-red-400 text-sm">{error}</p>}
-    </Shell>
+    </PageShell>
   );
 
-  // ── magic link request ──
   if (view === 'magic') return (
-    <Shell>
-      <button onClick={() => go('login')} className="flex items-center gap-1 text-sm mb-5 transition-colors hover:text-text-secondary" style={{ color: '#4b5a72' }}>
-        ← Back
-      </button>
-      <h2 className="text-lg font-semibold text-text-primary mb-1">Magic link</h2>
+    <PageShell>
+      <button onClick={() => go('login')} className="flex items-center gap-1 text-sm mb-5 transition-colors" style={{ color: '#64748b' }}>← Back</button>
+      <h2 className="text-lg font-semibold mb-1" style={{ color: '#f1f5f9' }}>Magic link</h2>
       <p className="text-sm mb-5" style={{ color: '#94a3b8' }}>We'll email you a one-click sign-in link — no password needed.</p>
       <form onSubmit={handleMagicLink} className="space-y-3">
-        <Field type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email address" autoComplete="email" />
-        <SubmitBtn loading={loading} label="Send Magic Link" loadingLabel="Sending…" />
+        <InputField type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email address" autoComplete="email" />
+        <PrimaryButton type="submit" disabled={loading || !email}>{loading ? 'Sending…' : 'Send Magic Link'}</PrimaryButton>
       </form>
       {error && <p className="mt-4 text-center text-red-400 text-sm">{error}</p>}
-    </Shell>
+    </PageShell>
   );
 
-  // ── login / signup ──
+  // ── Login / Sign-up ──
   const isSignUp = view === 'signup';
 
   return (
-    <Shell>
-      <SocialButtons />
-      <Divider />
+    <PageShell>
+      {isConverting && (
+        <div className="mb-4 rounded-xl px-4 py-3 text-sm text-center" style={{ background: 'rgba(124,58,237,0.12)', border: '1px solid rgba(124,58,237,0.3)', color: '#c4b5fd' }}>
+          💾 Save your decks by creating a free account
+        </div>
+      )}
+
+      {socialBlock}
+      <OrDivider />
 
       <form onSubmit={isSignUp ? handleSignUp : handleSignIn} className="space-y-3">
-        <Field
-          type="email" value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="Email address"
-          autoComplete="email"
-        />
-        <Field
-          type="password" value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          placeholder="Password"
-          autoComplete={isSignUp ? 'new-password' : 'current-password'}
-        />
+        <InputField type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email address" autoComplete="email" />
+        <InputField type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" autoComplete={isSignUp ? 'new-password' : 'current-password'} />
         {isSignUp && (
-          <Field
-            type="password" value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            placeholder="Confirm password"
-            autoComplete="new-password"
-          />
+          <InputField type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Confirm password" autoComplete="new-password" />
         )}
-        <SubmitBtn
-          loading={loading}
-          label={isSignUp ? 'Create Account' : 'Sign In'}
-          loadingLabel={isSignUp ? 'Creating…' : 'Signing in…'}
-        />
+        <PrimaryButton type="submit" disabled={loading}>
+          {loading
+            ? (isSignUp ? 'Creating…' : 'Signing in…')
+            : (isSignUp ? (isConverting ? 'Save My Decks' : 'Create Account') : 'Sign In')}
+        </PrimaryButton>
       </form>
 
       {!isSignUp && (
-        <button
-          onClick={() => go('forgot')}
-          className="w-full mt-2 text-center text-xs transition-colors hover:text-text-secondary"
-          style={{ color: '#4b5a72' }}
-        >
+        <button onClick={() => go('forgot')} className="w-full mt-2 text-center text-xs transition-colors" style={{ color: '#4b5563' }}>
           Forgot password?
         </button>
       )}
 
       {error && <p className="mt-3 text-center text-red-400 text-sm">{error}</p>}
 
-      <div className="mt-5 pt-4 text-center" style={{ borderTop: '1px solid #1e2d47' }}>
-        <span className="text-sm" style={{ color: '#94a3b8' }}>
-          {isSignUp ? 'Already have an account? ' : "Don't have an account? "}
-        </span>
-        <button
-          onClick={() => { setError(''); setPassword(''); setConfirmPassword(''); setView(isSignUp ? 'login' : 'signup'); }}
-          className="text-sm font-medium"
-          style={{ color: '#f59e0b' }}
-        >
-          {isSignUp ? 'Sign in' : 'Sign up'}
-        </button>
-      </div>
+      {!isConverting && (
+        <div className="mt-5 pt-4 text-center" style={{ borderTop: '1px solid #1e2d47' }}>
+          <span className="text-sm" style={{ color: '#94a3b8' }}>
+            {isSignUp ? 'Already have an account? ' : "Don't have an account? "}
+          </span>
+          <button
+            onClick={() => { setError(''); setPassword(''); setConfirmPassword(''); setView(isSignUp ? 'login' : 'signup'); }}
+            className="text-sm font-medium"
+            style={{ color: '#f59e0b' }}
+          >
+            {isSignUp ? 'Sign in' : 'Sign up'}
+          </button>
+        </div>
+      )}
 
       <div className="mt-2 text-center">
-        <button
-          onClick={() => go('magic')}
-          className="text-xs transition-colors hover:text-text-secondary"
-          style={{ color: '#4b5a72' }}
-        >
+        <button onClick={() => go('magic')} className="text-xs transition-colors" style={{ color: '#374151' }}>
           Prefer a magic link? →
         </button>
       </div>
-    </Shell>
+    </PageShell>
   );
 }

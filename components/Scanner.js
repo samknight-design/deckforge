@@ -85,7 +85,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
   const supabase = createClient();
   const router = useRouter();
 
-  const scanLimit = tier === 'pro' ? Infinity : 100;
+  const scanLimit = tier === 'pro' ? Infinity : 25;
   const activeDeck = decks.find((d) => d.id === activeDeckId);
   const isNewDeck = activeDeckId === NEW_DECK;
 
@@ -237,7 +237,15 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
     e.preventDefault();
     if (!newDeckName.trim()) return;
     const newDeck = await createNewDeck(newDeckName, newDeckFormat);
-    if (newDeck && pendingCardRef.current) { await doAddCard(pendingCardRef.current, newDeck.id); pendingCardRef.current = null; }
+    if (newDeck) {
+      const pending = pendingCardRef.current;
+      pendingCardRef.current = null;
+      if (pending) {
+        await doAddCard(pending, newDeck.id);
+      } else {
+        showToast(`✓ "${newDeck.name}" created — ready to add cards`, 'success');
+      }
+    }
     setShowNewDeckForm(false);
     setNewDeckName('');
   };
@@ -267,10 +275,10 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
       {/* Deck picker dropdown */}
       {showDeckPicker && (
         <div className="rounded-xl overflow-hidden mb-2 max-h-56 overflow-y-auto" style={{ background: '#111827', border: '1px solid #1e2d47', zIndex: 20, position: 'relative' }}>
-          <button onClick={() => { setActiveDeckId(NEW_DECK); setShowDeckPicker(false); }}
-            className="w-full text-left px-4 py-3 text-sm flex items-center gap-2"
-            style={{ color: isNewDeck ? '#f59e0b' : '#a78bfa', borderBottom: '1px solid #1e2d47', minHeight: 44, background: isNewDeck ? 'rgba(245,158,11,0.1)' : 'transparent' }}>
-            {isNewDeck && '✓ '}✨ Create New Deck
+          <button onClick={() => { setShowDeckPicker(false); pendingCardRef.current = null; setShowNewDeckForm(true); }}
+            className="w-full text-left px-4 py-3 text-sm flex items-center gap-2 font-medium"
+            style={{ color: '#a78bfa', borderBottom: '1px solid #1e2d47', minHeight: 44, background: 'transparent' }}>
+            ✨ Create New Deck
           </button>
           {decks.map((deck) => (
             <button key={deck.id} onClick={() => { setActiveDeckId(deck.id); setShowDeckPicker(false); }}

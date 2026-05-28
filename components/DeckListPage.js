@@ -25,7 +25,7 @@ export default function DeckListPage({ decks: initialDecks, tier, userId }) {
   const router = useRouter();
   const supabase = createClient();
 
-  const canCreateDeck = tier === 'pro' || decks.length < 3;
+  const canCreateDeck = tier === 'pro' || decks.length < 1;
 
   const handleNewDeck = () => {
     if (!canCreateDeck) { setShowUpgrade(true); return; }
@@ -66,7 +66,7 @@ export default function DeckListPage({ decks: initialDecks, tier, userId }) {
             <h1 className="text-xl font-bold text-white">My Decks</h1>
             <p className="text-xs text-slate-400 mt-0.5">
               {decks.length} deck{decks.length !== 1 ? 's' : ''}
-              {tier === 'free' && ` · ${decks.length}/3 free`}
+              {tier === 'free' && ` · ${decks.length}/1 free`}
             </p>
           </div>
           <button
@@ -111,9 +111,9 @@ export default function DeckListPage({ decks: initialDecks, tier, userId }) {
           decks.map((deck) => <DeckCard key={deck.id} deck={deck} />)
         )}
 
-        {tier === 'free' && decks.length >= 3 && (
+        {tier === 'free' && decks.length >= 1 && (
           <div className="rounded-2xl p-4 text-center" style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)' }}>
-            <p className="text-sm" style={{ color: '#f59e0b' }}>Free plan: 3 decks max</p>
+            <p className="text-sm" style={{ color: '#f59e0b' }}>Free plan: 1 deck max</p>
             <button onClick={() => setShowUpgrade(true)} className="mt-1 text-xs underline" style={{ color: '#f59e0b' }}>
               Upgrade for unlimited decks
             </button>

@@ -27,18 +27,17 @@ export async function middleware(request) {
 
   const pathname = request.nextUrl.pathname;
 
-  // Protected routes: /scan, /decks, /profile
+  // Protected routes require any session (including anonymous)
   const protectedPaths = ['/scan', '/decks', '/profile'];
   const isProtected = protectedPaths.some((p) => pathname.startsWith(p));
 
   if (isProtected && !user) {
-    const loginUrl = new URL('/login', request.url);
-    return NextResponse.redirect(loginUrl);
+    return NextResponse.redirect(new URL('/welcome', request.url));
   }
 
-  // Redirect logged-in users away from login
-  if (pathname === '/login' && user) {
-    return NextResponse.redirect(new URL('/scan', request.url));
+  // Redirect fully-authenticated (non-anonymous) users away from login/welcome
+  if ((pathname === '/login' || pathname === '/welcome') && user && !user.is_anonymous) {
+    return NextResponse.redirect(new URL('/decks', request.url));
   }
 
   return supabaseResponse;
