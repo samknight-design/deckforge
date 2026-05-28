@@ -48,7 +48,7 @@ function buildScryfallQuery({ name, colors, cardType, cmc, rarity }) {
 const FRAME_MS        = 150;   // how often to sample (ms)
 const FRAMES_PREVIEW  = 3;     // stable frames before showing green (~450ms)
 const FRAMES_TRIGGER  = 5;     // stable frames before firing scan (~750ms)
-const MOTION_THRESH   = 12;    // avg pixel diff considered "still"
+const MOTION_THRESH   = 22;    // avg pixel diff considered "still" (raised: 12 was too strict for hand-held)
 const COOLDOWN_MS     = 1800;  // pause after a failed scan
 
 export default function Scanner({
@@ -281,9 +281,9 @@ export default function Scanner({
       prevFrameRef.current = current;
       if (!prev) return;
 
-      // Average absolute diff on R channel, every 8th pixel
+      // Average absolute diff on R channel, every 4th pixel
       let diff = 0, n = 0;
-      for (let i = 0; i < current.length; i += 32) {
+      for (let i = 0; i < current.length; i += 16) {
         diff += Math.abs(current[i] - prev[i]);
         n++;
       }
