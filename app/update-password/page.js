@@ -32,7 +32,7 @@ export default function UpdatePasswordPage() {
       setLoading(false);
     } else {
       setDone(true);
-      setTimeout(() => router.push('/scan'), 2000);
+      setTimeout(() => router.push('/decks'), 2000);
     }
   };
 

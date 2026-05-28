@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { groupCardsByType, computeDeckHash, getDeckWarnings } from '@/lib/deckUtils';
@@ -98,6 +98,21 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
   );
 
   const [showWarnings, setShowWarnings] = useState(false);
+  const [insightToShow, setInsightToShow] = useState(null); // which insight to pass to the sheet
+
+  // Fetch latest stored insight on mount
+  useEffect(() => {
+    supabase
+      .from('insights')
+      .select('content, bracket_estimate, generated_at, deck_hash')
+      .eq('deck_id', deck.id)
+      .order('generated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data) setLastInsight(data);
+      });
+  }, [deck.id]);
 
   const saveName = async () => {
     if (editedName.trim() === deck.name) { setIsEditingName(false); return; }
@@ -408,23 +423,29 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
         )}
       </div>
 
-      {/* Generate Insights FAB */}
+      {/* Insights FAB */}
       <div
         className="absolute bottom-0 left-0 right-0 px-4 pb-3 pt-2"
         style={{ background: 'linear-gradient(to top, #0a0e1a 70%, transparent)', pointerEvents: 'none' }}
       >
-        <button
-          onClick={() => setShowInsights(true)}
-          className="w-full rounded-2xl py-3.5 text-sm font-bold flex items-center justify-center gap-2"
-          style={{
-            background: 'linear-gradient(135deg, #7c3aed, #f59e0b)',
-            color: '#fff',
-            minHeight: 48,
-            pointerEvents: 'all',
-          }}
-        >
-          ✨ Generate Insights
-        </button>
+        <div className="flex gap-2" style={{ pointerEvents: 'all' }}>
+          {lastInsight && (
+            <button
+              onClick={() => { setInsightToShow(lastInsight); setShowInsights(true); }}
+              className="rounded-2xl py-3.5 px-4 text-sm font-semibold flex items-center justify-center gap-1.5 flex-shrink-0"
+              style={{ background: '#1a2235', border: '1px solid rgba(124,58,237,0.4)', color: '#a78bfa', minHeight: 48 }}
+            >
+              📊 Previous
+            </button>
+          )}
+          <button
+            onClick={() => { setInsightToShow(null); setShowInsights(true); }}
+            className="flex-1 rounded-2xl py-3.5 text-sm font-bold flex items-center justify-center gap-2"
+            style={{ background: 'linear-gradient(135deg, #7c3aed, #f59e0b)', color: '#fff', minHeight: 48 }}
+          >
+            ✨ {lastInsight ? 'Generate New' : 'Generate Insights'}
+          </button>
+        </div>
       </div>
 
       {/* Modals */}
@@ -434,7 +455,9 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
           deck={deck}
           tier={tier}
           hasChanged={hasChanged}
-          lastInsight={lastInsight}
+          lastInsight={insightToShow}
+          autoGenerate={!insightToShow}
+          onInsightGenerated={(newInsight) => setLastInsight(newInsight)}
           onClose={() => setShowInsights(false)}
         />
       )}

@@ -76,6 +76,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
   const [newDeckName, setNewDeckName] = useState('');
   const [newDeckFormat, setNewDeckFormat] = useState('commander');
   const [creatingDeck, setCreatingDeck] = useState(false);
+  const [formHasCard, setFormHasCard] = useState(false); // true when form was triggered by a pending card
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -229,7 +230,12 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
   };
 
   const addCardToDeck = async (card, deckId) => {
-    if (deckId === NEW_DECK || !deckId) { pendingCardRef.current = card; setShowNewDeckForm(true); return; }
+    if (deckId === NEW_DECK || !deckId) {
+      pendingCardRef.current = card;
+      setFormHasCard(true);
+      setShowNewDeckForm(true);
+      return;
+    }
     await doAddCard(card, deckId);
   };
 
@@ -275,7 +281,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
       {/* Deck picker dropdown */}
       {showDeckPicker && (
         <div className="rounded-xl overflow-hidden mb-2 max-h-56 overflow-y-auto" style={{ background: '#111827', border: '1px solid #1e2d47', zIndex: 20, position: 'relative' }}>
-          <button onClick={() => { setShowDeckPicker(false); pendingCardRef.current = null; setShowNewDeckForm(true); }}
+          <button onClick={() => { setShowDeckPicker(false); pendingCardRef.current = null; setFormHasCard(false); setShowNewDeckForm(true); }}
             className="w-full text-left px-4 py-3 text-sm flex items-center gap-2 font-medium"
             style={{ color: '#a78bfa', borderBottom: '1px solid #1e2d47', minHeight: 44, background: 'transparent' }}>
             ✨ Create New Deck
@@ -556,7 +562,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
           <div className="rounded-2xl p-6 text-center max-w-xs" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
             <div className="text-4xl mb-3">🚫</div>
             <h3 className="font-bold text-white mb-2">Monthly limit reached</h3>
-            <p className="text-slate-400 text-sm mb-4">You've used all 100 free scans this month.</p>
+            <p className="text-slate-400 text-sm mb-4">You've used all 25 free scans this month.</p>
             <button onClick={() => router.push('/profile')} className="w-full rounded-xl py-3 font-semibold text-sm" style={{ background: '#f59e0b', color: '#0a0e1a' }}>
               Upgrade to Pro
             </button>
@@ -581,8 +587,10 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
           onClick={(e) => { if (e.target === e.currentTarget) setShowNewDeckForm(false); }}>
           <div className="w-full rounded-t-2xl px-4 pt-4 pb-8" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
             <div className="flex justify-center mb-4"><div className="w-10 h-1 rounded-full" style={{ background: '#1e2d47' }} /></div>
-            <h2 className="text-lg font-bold text-white mb-1">Name Your New Deck</h2>
-            <p className="text-slate-400 text-sm mb-4">The card will be added once the deck is created.</p>
+            <h2 className="text-lg font-bold text-white mb-1">Create New Deck</h2>
+            <p className="text-slate-400 text-sm mb-4">
+              {formHasCard ? 'The card will be added once the deck is created.' : 'Give your deck a name and choose a format.'}
+            </p>
             <form onSubmit={handleNewDeckSubmit} className="space-y-4">
               <input type="text" value={newDeckName} onChange={(e) => setNewDeckName(e.target.value)}
                 placeholder="e.g. Atraxa Superfriends" required autoFocus
@@ -605,7 +613,7 @@ export default function Scanner({ decks: initialDecks, tier, scanCount: initialS
                 <button type="submit" disabled={creatingDeck || !newDeckName.trim()}
                   className="flex-1 rounded-xl py-3 text-sm font-semibold disabled:opacity-50"
                   style={{ background: '#f59e0b', color: '#0a0e1a', minHeight: 44 }}>
-                  {creatingDeck ? 'Creating…' : 'Create & Add Card'}
+                  {creatingDeck ? 'Creating…' : formHasCard ? 'Create & Add Card' : 'Create Deck'}
                 </button>
               </div>
             </form>

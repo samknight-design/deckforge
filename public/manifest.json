@@ -2,7 +2,7 @@
   "name": "DeckForge",
   "short_name": "DeckForge",
   "description": "Magic: The Gathering companion app — scan cards, build decks, get AI insights",
-  "start_url": "/scan",
+  "start_url": "/decks",
   "display": "standalone",
   "background_color": "#0a0e1a",
   "theme_color": "#f59e0b",

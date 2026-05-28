@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 const BRACKET_COLORS = ['', '#10b981', '#22c55e', '#f59e0b', '#ef4444', '#7c3aed'];
 const BRACKET_LABELS = ['', 'Casual', 'Focused Casual', 'Optimised', 'High Power', 'cEDH'];
@@ -70,10 +70,17 @@ function renderMarkdown(text) {
   return elements;
 }
 
-export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsight, onClose }) {
+export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsight, autoGenerate, onInsightGenerated, onClose }) {
   const [insight, setInsight] = useState(lastInsight);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Auto-start generation when opened with no pre-loaded insight
+  useEffect(() => {
+    if (autoGenerate && !lastInsight) {
+      generateInsights();
+    }
+  }, []);
 
   const generateInsights = async () => {
     setLoading(true);
@@ -87,6 +94,7 @@ export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsi
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to generate insights');
       setInsight(data);
+      if (onInsightGenerated) onInsightGenerated(data);
     } catch (err) {
       setError(err.message);
     } finally {
