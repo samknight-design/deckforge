@@ -98,8 +98,10 @@ export default function Scanner({
   const videoRef         = useRef(null);
   const streamRef        = useRef(null);
   const canvasRef        = useRef(null);
+  const sampleCanvasRef  = useRef(null); // tiny offscreen canvas for motion sampling
   const pendingCardRef   = useRef(null);
   const searchDebounceRef = useRef(null);
+  const cooldownTimerRef = useRef(null);
 
   // ── Auto-scan refs (avoid stale-closure issues) ───────
   const isScanningRef    = useRef(false);
@@ -124,6 +126,7 @@ export default function Scanner({
   // ── Keep refs in sync ────────────────────────────────
   useEffect(() => { scanCountRef.current = scanCount; }, [scanCount]);
   useEffect(() => { cameraReadyRef.current = cameraReady; }, [cameraReady]);
+  useEffect(() => { scanLimitRef.current = tier === 'pro' ? Infinity : 25; }, [tier]);
   useEffect(() => {
     hasResultRef.current = !!result;
     if (!result) {
@@ -185,17 +188,25 @@ export default function Scanner({
   }, []);
 
   // ── Frame sampling ────────────────────────────────────
+  // Draws ONLY the 80×60 centre crop into a tiny offscreen canvas — far
+  // cheaper than redrawing the full 1280×720 frame ~7×/sec just to read 4,800px.
   const sampleCenter = () => {
-    const video  = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video?.videoWidth || !canvas) return null;
-    canvas.width  = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
+    const video = videoRef.current;
+    if (!video?.videoWidth) return null;
+
+    let canvas = sampleCanvasRef.current;
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.width = 80;
+      canvas.height = 60;
+      sampleCanvasRef.current = canvas;
+    }
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const cx = Math.floor(video.videoWidth  / 2);
     const cy = Math.floor(video.videoHeight / 2);
-    return ctx.getImageData(cx - 40, cy - 30, 80, 60).data;
+    // src crop (80×60 at centre) → dest (full 80×60 small canvas)
+    ctx.drawImage(video, cx - 40, cy - 30, 80, 60, 0, 0, 80, 60);
+    return ctx.getImageData(0, 0, 80, 60).data;
   };
 
   const captureFullFrame = () => {
@@ -207,6 +218,20 @@ export default function Scanner({
     canvas.getContext('2d').drawImage(video, 0, 0);
     return new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.92));
   };
+
+  // Pause detection briefly after a failed scan, then resume
+  const startCooldown = useCallback(() => {
+    inCooldownRef.current = true;
+    updateScanState('cooldown');
+    clearTimeout(cooldownTimerRef.current);
+    cooldownTimerRef.current = setTimeout(() => {
+      inCooldownRef.current = false;
+      updateScanState('idle');
+    }, COOLDOWN_MS);
+  }, [updateScanState]);
+
+  // Clear any pending cooldown timer on unmount
+  useEffect(() => () => clearTimeout(cooldownTimerRef.current), []);
 
   // ── Core scan function ────────────────────────────────
   const doScan = useCallback(async (fromBlob = null) => {
@@ -235,26 +260,16 @@ export default function Scanner({
         updateScanState('idle');
       } else {
         showToast(data.error || 'Card not recognized — try repositioning', 'error');
-        inCooldownRef.current = true;
-        updateScanState('cooldown');
-        setTimeout(() => {
-          inCooldownRef.current = false;
-          updateScanState('idle');
-        }, COOLDOWN_MS);
+        startCooldown();
       }
     } catch {
       showToast('Scan failed — check your connection', 'error');
-      inCooldownRef.current = true;
-      updateScanState('cooldown');
-      setTimeout(() => {
-        inCooldownRef.current = false;
-        updateScanState('idle');
-      }, COOLDOWN_MS);
+      startCooldown();
     } finally {
       setScanning(false);
       isScanningRef.current = false;
     }
-  }, [updateScanState]);
+  }, [updateScanState, startCooldown]);
 
   // Gallery upload
   const handleGalleryUpload = async (e) => {
@@ -394,6 +409,13 @@ export default function Scanner({
     await doAddCard(card, deckId);
   };
 
+  const closeNewDeckForm = () => {
+    setShowNewDeckForm(false);
+    setNewDeckName('');
+    setFormHasCard(false);
+    pendingCardRef.current = null;
+  };
+
   const handleNewDeckSubmit = async (e) => {
     e.preventDefault();
     if (!newDeckName.trim()) return;
@@ -402,13 +424,12 @@ export default function Scanner({
       const pending = pendingCardRef.current;
       pendingCardRef.current = null;
       if (pending) {
-        await doAddCard(pending, newDeck.id);
+        await doAddCard(pending, newDeck.id); // also clears result via setResult(null)
       } else {
         showToast(`✓ "${newDeck.name}" created — ready to add cards`, 'success');
       }
     }
-    setShowNewDeckForm(false);
-    setNewDeckName('');
+    closeNewDeckForm();
   };
 
   // ── Viewfinder appearance ─────────────────────────────
@@ -437,7 +458,9 @@ export default function Scanner({
     'rgba(255,255,255,0.5)';
 
   // ── Shared top bar ────────────────────────────────────
-  const TopBar = () => (
+  // Plain JSX (not a component) so it isn't remounted on every render —
+  // critical during auto-scan where scanState flips several times a second.
+  const topBar = (
     <>
       <div className="flex items-center justify-between mb-3">
         <button
@@ -711,7 +734,7 @@ export default function Scanner({
             className="absolute top-0 left-0 right-0 px-4 pt-4 pb-2 z-10"
             style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.78) 0%, transparent 100%)' }}
           >
-            <TopBar />
+            {topBar}
           </div>
         </>
       )}
@@ -723,7 +746,7 @@ export default function Scanner({
             className="flex-shrink-0 px-4 pt-4 pb-3"
             style={{ background: '#0a0e1a', borderBottom: '1px solid #1e2d47' }}
           >
-            <TopBar />
+            {topBar}
           </div>
 
           <div
@@ -911,12 +934,12 @@ export default function Scanner({
         />
       )}
 
-      {/* ── New deck form ── */}
+      {/* ── New deck form (z-[60]: above the result sheet at z-50) ── */}
       {showNewDeckForm && (
         <div
-          className="absolute inset-0 flex items-end z-30"
+          className="absolute inset-0 flex items-end z-[60]"
           style={{ background: 'rgba(0,0,0,0.7)' }}
-          onClick={(e) => { if (e.target === e.currentTarget) setShowNewDeckForm(false); }}
+          onClick={(e) => { if (e.target === e.currentTarget) closeNewDeckForm(); }}
         >
           <div className="w-full rounded-t-2xl px-4 pt-4 pb-8" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
             <div className="flex justify-center mb-4">
@@ -956,7 +979,7 @@ export default function Scanner({
               </div>
               <div className="flex gap-3 pt-1">
                 <button
-                  type="button" onClick={() => setShowNewDeckForm(false)}
+                  type="button" onClick={closeNewDeckForm}
                   className="flex-1 rounded-xl py-3 text-sm font-medium"
                   style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 44 }}
                 >
