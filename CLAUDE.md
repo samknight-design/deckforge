@@ -31,7 +31,17 @@ npm run lint
   `lib/gamification.js` (server: recordEvent/addCredits, service client). Tables: `user_achievements`,
   `user_tasks`, `credit_ledger` (RLS = own reads; writes via service role).
 - Profiles: `username` (unique, case-insensitive), `avatar_key` (preset pack via `components/Avatar.js`),
-  `xp`, credit balances, lifetime counters. Public profile at `/u/[username]` (service-client read).
+  `xp`, credit balances, lifetime counters, `is_admin`. Public profile at `/u/[username]`; `/rewards` is a
+  season-pass style level/credit track.
+- **Editable content (no code/deploy)**: `challenges` and `news_items` tables are managed via the
+  **Supabase Table Editor**. Challenges drive the profile "Challenges" list + `recordEvent`
+  (add a monthly challenge = insert a row; `metric` ∈ scan|insight|like_given|publish). `news_items`
+  drive the homepage "What's new" (kind = news|update). Code catalogue `TASKS` in `lib/tiers.js` was
+  the seed and is now unused at runtime.
+- **Reward notifications**: `recordEvent` returns a rewards summary; scan/insight/like APIs return it as
+  `rewards`; `components/RewardToast.js` (`showReward`) shows an unobtrusive popup on
+  level-up / achievement / challenge-complete only. Profile `router.refresh()`es on mount to avoid stale
+  XP/credit counters from the Next router cache.
 - `app/welcome` + `app/login` — entry / auth (welcome is the first-visit landing)
 - `app/api/scan` — POST image → Claude vision returns `{name, set_code, collector_number}` (JSON) →
   resolve EXACT printing via Scryfall (set/number → name+set → name fallback, with name-match
