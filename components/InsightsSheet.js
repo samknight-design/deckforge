@@ -198,6 +198,32 @@ function Dashboard({ data, onPick }) {
   );
 }
 
+// Shown for older insights that predate the structured dashboard (data === null):
+// a greyed placeholder prompting a regenerate, with the original text below.
+function LegacyInsight({ content }) {
+  return (
+    <div>
+      <div className="rounded-2xl p-4 mb-4 text-center" style={{ background: '#1a2235', border: '1px dashed #2c3e5c' }}>
+        <div className="flex items-center justify-center gap-2 mb-2 opacity-50">
+          <div className="rounded-xl" style={{ width: 56, height: 56, background: '#0d1424', border: '1px solid #1e2d47' }} />
+          <div className="text-left">
+            <div className="h-3 w-24 rounded mb-1.5" style={{ background: '#0d1424' }} />
+            <div className="h-2 w-32 rounded" style={{ background: '#0d1424' }} />
+          </div>
+        </div>
+        <p className="text-sm font-medium" style={{ color: '#94a3b8' }}>Dashboard not available for this analysis</p>
+        <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>Regenerate insight to populate the dashboard.</p>
+      </div>
+      {content && (
+        <div className="rounded-xl p-3" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
+          <div className="text-xs font-semibold mb-1" style={{ color: '#64748b' }}>Previous analysis</div>
+          <div className="prose prose-invert max-w-none">{renderMarkdown(content)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsight, autoGenerate, onInsightGenerated, onClose }) {
   const [insight, setInsight] = useState(lastInsight);
   const [loading, setLoading] = useState(false);
@@ -212,14 +238,14 @@ export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsi
     }
   }, []);
 
-  const generateInsights = async () => {
+  const generateInsights = async (force = false) => {
     setLoading(true);
     setError('');
     try {
       const res = await fetch('/api/insights', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deckId }),
+        body: JSON.stringify({ deckId, force }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to generate insights');
@@ -320,7 +346,7 @@ export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsi
           {!loading && insight && (
             data
               ? <Dashboard data={data} onPick={pickCard} />
-              : insight.content && <div className="prose prose-invert max-w-none">{renderMarkdown(insight.content)}</div>
+              : <LegacyInsight content={insight.content} />
           )}
 
           {previewLoading && (
@@ -337,9 +363,9 @@ export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsi
           >
             Close
           </button>
-          {(!insight || hasChanged) && (
+          {(!insight || hasChanged || !data) && (
             <button
-              onClick={generateInsights}
+              onClick={() => generateInsights(true)}
               disabled={loading}
               className="flex-2 rounded-xl py-3 px-4 text-sm font-semibold disabled:opacity-50"
               style={{ background: 'linear-gradient(135deg, #7c3aed, #f59e0b)', color: '#fff', minHeight: 44, flex: 2 }}

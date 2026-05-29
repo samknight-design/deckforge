@@ -14,7 +14,7 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { deckId } = await request.json();
+    const { deckId, force } = await request.json();
     if (!deckId) {
       return NextResponse.json({ error: 'deckId required' }, { status: 400 });
     }
@@ -71,8 +71,8 @@ export async function POST(request) {
     }));
     const deckHash = computeDeckHash(cardList);
 
-    // Check cached insight (same hash, < 7 days)
-    if (deck.insight_deck_hash === deckHash && deck.last_insight_at) {
+    // Check cached insight (same hash, < 7 days) — skipped when force-regenerating
+    if (!force && deck.insight_deck_hash === deckHash && deck.last_insight_at) {
       const lastAt = new Date(deck.last_insight_at);
       const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
       if (lastAt > sevenDaysAgo) {
@@ -167,8 +167,11 @@ Provide 3-5 items each in strengths, weaknesses, cards_to_add and cards_to_remov
     // `content` keeps a human-readable fallback (used if `data` is ever absent).
     const content = data?.summary || raw;
 
-    // Save insight (structured data + text fallback)
+    // Replace any prior insights for this deck so regenerating overwrites
+    // rather than stacking up old analyses.
     const serviceClient = createServiceClient();
+    await serviceClient.from('insights').delete().eq('deck_id', deckId);
+
     const { data: savedInsight } = await serviceClient
       .from('insights')
       .insert({

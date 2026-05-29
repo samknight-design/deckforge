@@ -163,15 +163,35 @@ export default function ImportDeckModal({ deckId, userId, decks = [], onImport, 
           {step === 'paste' && (
             <div className="space-y-3">
               <p className="text-xs text-slate-400">
-                Supported formats: <code className="text-amber-400">4 Lightning Bolt</code> · <code className="text-amber-400">4x Card Name</code> · <code className="text-amber-400">Card Name x4</code>
-                <br />Lines starting with <code className="text-amber-400">//</code> or <code className="text-amber-400">SB:</code> are ignored.
+                Paste from <span className="text-amber-400">Moxfield</span>, <span className="text-amber-400">Archidekt</span>, <span className="text-amber-400">MTGGoldfish</span> or any plain list — set codes, collector numbers, foils (<code className="text-amber-400">*F*</code>) and section headers (Commander / Deck / Sideboard) are handled automatically.
               </p>
+
+              <label
+                className="flex items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-medium cursor-pointer"
+                style={{ background: '#1a2235', border: '1px dashed #2c3e5c', color: '#94a3b8', minHeight: 44 }}
+              >
+                📄 Upload a .txt / .dec file
+                <input
+                  type="file"
+                  accept=".txt,.dec,.csv,text/plain"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = () => { setText(String(reader.result || '')); setPreview(null); setError(''); };
+                    reader.readAsText(file);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+
               <textarea
                 value={text}
                 onChange={(e) => { setText(e.target.value); setPreview(null); setError(''); }}
-                placeholder={"4 Lightning Bolt\n4x Goblin Guide\n2 Mountain\n..."}
+                placeholder={"1 Sol Ring (C21) 263 *F*\n1x Atraxa, Praetors' Voice\n10 Forest\n..."}
                 className="w-full rounded-xl p-3 text-sm font-mono outline-none focus:ring-2 ring-gold resize-none"
-                style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 220 }}
+                style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 200 }}
               />
               {error && <p className="text-red-400 text-sm">{error}</p>}
             </div>
@@ -186,6 +206,8 @@ export default function ImportDeckModal({ deckId, userId, decks = [], onImport, 
                   {preview.slice(0, 25).map((c, i) => (
                     <div key={i} className="text-sm text-slate-300">
                       <span className="text-white font-medium">{c.quantity}x</span> {c.name}
+                      {c.commander && <span className="text-xs ml-1" style={{ color: '#a78bfa' }}>· CMD</span>}
+                      {c.foil && <span className="text-xs ml-1" style={{ color: '#c4b5fd' }}>✦</span>}
                     </div>
                   ))}
                   {preview.length > 25 && <div className="text-slate-400 text-xs">…and {preview.length - 25} more</div>}
