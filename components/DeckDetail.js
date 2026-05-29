@@ -79,7 +79,10 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
 
   const target = deck.format === 'commander' ? 100 : 60;
   const cardCount = cards.reduce((s, c) => s + (c.quantity || 1), 0);
-  const totalValue = cards.reduce((s, c) => s + (c.price_eur || 0) * (c.quantity || 1), 0);
+  const totalValue = cards.reduce((s, c) => {
+    const unit = c.is_foil ? (c.price_eur_foil ?? c.price_eur ?? 0) : (c.price_eur ?? 0);
+    return s + unit * (c.quantity || 1);
+  }, 0);
 
   const deckHash = useMemo(() => computeDeckHash(cards), [cards]);
   const hasChanged = deck.insight_deck_hash !== deckHash;
@@ -319,7 +322,10 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
               </div>
             )}
 
-            {/* Action row */}
+            {/* Add-cards row */}
+            <p className="text-xs font-semibold uppercase tracking-wider mb-2 px-1" style={{ color: '#64748b' }}>
+              Add cards to this deck
+            </p>
             <div className="flex gap-2 mb-3">
               <button
                 onClick={() => setShowImport(true)}
@@ -333,7 +339,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
                 className="flex-1 flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-semibold"
                 style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 40 }}
               >
-                🔍 Search
+                🔍 Find
               </button>
               <button
                 onClick={() => router.push(`/scan?deckId=${deck.id}`)}
@@ -344,6 +350,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
               </button>
               <button
                 onClick={() => setViewMode(viewMode === 'list' ? 'grid' : 'list')}
+                title={viewMode === 'list' ? 'Grid view' : 'List view'}
                 className="rounded-xl py-2.5 px-3 text-xs font-semibold"
                 style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 40 }}
               >

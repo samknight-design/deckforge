@@ -16,7 +16,7 @@ export default async function DeckDetailPage({ params }) {
       .single(),
     supabase
       .from('deck_cards')
-      .select('id, deck_id, scryfall_id, card_name, quantity, is_commander, is_partner, added_at')
+      .select('id, deck_id, scryfall_id, card_name, quantity, is_commander, is_partner, is_foil, added_at')
       .eq('deck_id', params.id)
       .order('card_name'),
     supabase

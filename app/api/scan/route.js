@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient, createServiceClient } from '@/lib/supabase/server';
-import { fetchCardByName } from '@/lib/scryfall';
+import { fetchCardByName, fetchCardBySetAndNumber, fetchCardByNameAndSet } from '@/lib/scryfall';
 import { checkScanLimit, incrementScanCount } from '@/lib/usage';
 import Anthropic from '@anthropic-ai/sdk';
 
@@ -52,12 +52,15 @@ export async function POST(request) {
     const base64 = btoa(binary);
     const mimeType = imageFile.type || 'image/jpeg';
 
-    // Claude vision identifies the card
+    // Claude vision reads the card's identifying marks. We ask for the title
+    // (most reliable) plus the set code + collector number printed on the
+    // bottom info line — together those pin down the exact printing the user is
+    // holding (full-art, set, basic lands, etc.), not just a default printing.
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5',
-      max_tokens: 60,
+      max_tokens: 150,
       messages: [
         {
           role: 'user',
@@ -68,14 +71,34 @@ export async function POST(request) {
             },
             {
               type: 'text',
-              text: 'This is a Magic: The Gathering card. What is the exact card name printed at the top of the card? Reply with ONLY the card name — no punctuation, no explanations. If you cannot clearly see a card name, reply with UNKNOWN.',
+              text:
+                'Identify this Magic: The Gathering card from the photo. Reply with ONLY a JSON object (no markdown fences, no commentary) of this exact shape:\n' +
+                '{"name": string|null, "set_code": string|null, "collector_number": string|null}\n\n' +
+                '- name: the exact card name printed at the top. For basic lands use just "Forest", "Island", "Swamp", "Mountain", or "Plains".\n' +
+                '- set_code: the 3–5 letter set code on the bottom info line (the small code beside the collector number and rarity letter). Use null if unreadable.\n' +
+                '- collector_number: the collector number, usually bottom-left (e.g. "234", or the number before the slash in "234/281"). Return only the number. Use null if unreadable.\n\n' +
+                'If you cannot identify the card at all, return {"name": null, "set_code": null, "collector_number": null}.',
             },
           ],
         },
       ],
     });
 
-    const cardName = message.content[0].text.trim();
+    // Parse the structured response, tolerating stray prose or code fences.
+    const raw = (message.content[0]?.text || '').trim();
+    let detected = { name: null, set_code: null, collector_number: null };
+    try {
+      const jsonText = raw.replace(/```json|```/gi, '').trim();
+      const match = jsonText.match(/\{[\s\S]*\}/);
+      detected = JSON.parse(match ? match[0] : jsonText);
+    } catch {
+      // Fall back to treating the whole reply as a bare card name.
+      if (raw && raw.toUpperCase() !== 'UNKNOWN') detected.name = raw;
+    }
+
+    const cardName = (detected.name || '').trim();
+    const setCode = detected.set_code ? String(detected.set_code).trim() : null;
+    const collectorNumber = detected.collector_number ? String(detected.collector_number).trim() : null;
 
     if (!cardName || cardName.toUpperCase() === 'UNKNOWN') {
       return NextResponse.json(
@@ -84,35 +107,40 @@ export async function POST(request) {
       );
     }
 
-    // Round 3: cache lookup + usage increment can happen together after Anthropic responds
-    const [cachedResult] = await Promise.all([
-      serviceClient
-        .from('card_cache')
-        .select('*')
-        .ilike('card_name', cardName)
-        .gt('expires_at', new Date().toISOString())
-        .maybeSingle(),
-    ]);
+    // Resolve the most specific printing we can, with safe fallbacks. We
+    // validate that an exact set/number hit actually matches the detected name,
+    // so a misread code can't silently return the wrong card.
+    const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const nameMatches = (a, b) => {
+      const na = norm(a), nb = norm(b);
+      if (!na || !nb) return false;
+      return na === nb || na.startsWith(nb) || nb.startsWith(na) || na.includes(nb) || nb.includes(na);
+    };
 
-    let card = cachedResult.data;
+    let card = null;
+    if (setCode && collectorNumber) {
+      const exact = await fetchCardBySetAndNumber(setCode, collectorNumber);
+      if (exact && nameMatches(exact.card_name, cardName)) card = exact;
+    }
+    if (!card && setCode) {
+      card = await fetchCardByNameAndSet(cardName, setCode);
+    }
+    if (!card) {
+      card = await fetchCardByName(cardName);
+    }
 
     if (!card) {
-      const scryfallCard = await fetchCardByName(cardName);
-      if (!scryfallCard) {
-        return NextResponse.json(
-          { error: `"${cardName}" not found — try scanning again` },
-          { status: 404 }
-        );
-      }
-      // Cache write + usage increment in parallel
-      await Promise.all([
-        serviceClient.from('card_cache').upsert(scryfallCard, { onConflict: 'scryfall_id' }),
-        incrementScanCount(serviceClient, user.id),
-      ]);
-      card = scryfallCard;
-    } else {
-      await incrementScanCount(serviceClient, user.id);
+      return NextResponse.json(
+        { error: `"${cardName}" not found — try scanning again` },
+        { status: 404 }
+      );
     }
+
+    // Cache the resolved printing (keyed by scryfall_id) + count the scan.
+    await Promise.all([
+      serviceClient.from('card_cache').upsert(card, { onConflict: 'scryfall_id' }),
+      incrementScanCount(serviceClient, user.id),
+    ]);
 
     return NextResponse.json({
       card: {
@@ -126,8 +154,11 @@ export async function POST(request) {
         color_identity: card.color_identity,
         price_eur: card.price_eur,
         price_usd: card.price_usd,
+        price_eur_foil: card.price_eur_foil,
+        price_usd_foil: card.price_usd_foil,
         is_legendary: card.is_legendary,
         oracle_text: card.oracle_text,
+        set_code: card.set_code,
         set_name: card.set_name,
       },
     });

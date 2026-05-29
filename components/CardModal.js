@@ -48,6 +48,11 @@ export default function CardModal({ card, format, hasCommander, onClose, onMakeC
                 ⚔ Partner Commander
               </span>
             )}
+            {card.is_foil && (
+              <span className="text-xs font-bold rounded px-2 py-0.5" style={{ background: 'rgba(124,58,237,0.22)', color: '#c4b5fd' }}>
+                ✦ Foil
+              </span>
+            )}
           </div>
 
           {/* Type line */}

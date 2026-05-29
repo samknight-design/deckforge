@@ -51,6 +51,15 @@ export default function CardRow({ card, format, hasCommander, onQuantityChange, 
                 {isPartner ? 'Partner' : 'CMD'}
               </span>
             )}
+            {card.is_foil && (
+              <span
+                className="text-xs font-bold rounded px-1.5 py-0.5"
+                style={{ background: 'rgba(124,58,237,0.22)', color: '#c4b5fd' }}
+                title="Foil"
+              >
+                ✦ Foil
+              </span>
+            )}
             {showSingletonWarning && (
               <span className="text-xs" title="Singleton violation">⚠️</span>
             )}

@@ -10,15 +10,20 @@ export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDi
   // If activeDeckId is null (scanner had "New Deck" selected) or no decks exist, pre-select __new__
   const [selectedDeckId, setSelectedDeckId] = useState(activeDeckId || decks[0]?.id || NEW_DECK);
   const [adding, setAdding] = useState(false);
+  const [isFoil, setIsFoil] = useState(false);
 
   const handleAdd = async () => {
     if (!selectedDeckId) return;
     setAdding(true);
-    await onAdd(card, selectedDeckId);
+    await onAdd(card, selectedDeckId, isFoil);
     setAdding(false);
   };
 
   const formatPrice = (v) => (v != null ? `€${parseFloat(v).toFixed(2)}` : '—');
+
+  // Foil-aware pricing (falls back to non-foil if the printing has no foil price)
+  const eurPrice = isFoil ? (card.price_eur_foil ?? card.price_eur) : card.price_eur;
+  const usdPrice = isFoil ? (card.price_usd_foil ?? card.price_usd) : card.price_usd;
 
   return (
     <>
@@ -65,22 +70,51 @@ export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDi
               <h3 className="font-bold text-text-primary text-base leading-snug mb-1 truncate">
                 {card.card_name}
               </h3>
-              <p className="text-text-secondary text-xs mb-2 leading-relaxed line-clamp-2">
+              <p className="text-text-secondary text-xs mb-1 leading-relaxed line-clamp-2">
                 {card.type_line}
               </p>
+              {card.set_name && (
+                <p className="text-xs mb-2 truncate" style={{ color: '#64748b' }}>
+                  {card.set_name}{card.set_code ? ` · ${card.set_code.toUpperCase()}` : ''}
+                </p>
+              )}
               <div className="flex items-center gap-2 mb-2">
                 <ManaCostDisplay manaCost={card.mana_cost} size={16} />
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-sm font-semibold" style={{ color: '#10b981' }}>
-                  {formatPrice(card.price_eur)}
+                <span className="text-sm font-semibold" style={{ color: isFoil ? '#a78bfa' : '#10b981' }}>
+                  {formatPrice(eurPrice)}{isFoil ? ' ✦' : ''}
                 </span>
-                {card.price_usd != null && (
-                  <span className="text-xs text-text-dim">${parseFloat(card.price_usd).toFixed(2)}</span>
+                {usdPrice != null && (
+                  <span className="text-xs text-text-dim">${parseFloat(usdPrice).toFixed(2)}</span>
                 )}
               </div>
             </div>
           </div>
+
+          {/* Foil toggle — the scanned printing's finish */}
+          <button
+            onClick={() => setIsFoil((f) => !f)}
+            className="w-full flex items-center justify-between rounded-xl px-4 py-3 mt-4"
+            style={{
+              background: isFoil ? 'rgba(124,58,237,0.15)' : '#1a2235',
+              border: `1px solid ${isFoil ? '#7c3aed' : '#1e2d47'}`,
+              minHeight: 44,
+            }}
+          >
+            <span className="text-sm font-medium" style={{ color: isFoil ? '#c4b5fd' : '#94a3b8' }}>
+              ✦ Foil
+            </span>
+            <span
+              className="relative rounded-full transition-colors"
+              style={{ width: 40, height: 22, background: isFoil ? '#7c3aed' : '#334155', flexShrink: 0 }}
+            >
+              <span
+                className="absolute rounded-full bg-white transition-all"
+                style={{ width: 18, height: 18, top: 2, left: isFoil ? 20 : 2 }}
+              />
+            </span>
+          </button>
 
           {/* Deck selector */}
           <div className="mt-4">
@@ -130,7 +164,11 @@ export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDi
                 flex: 2,
               }}
             >
-              {adding ? 'Adding…' : selectedDeckId === NEW_DECK ? '✨ Create & Add' : 'Add to Deck'}
+              {adding
+                ? 'Adding…'
+                : selectedDeckId === NEW_DECK
+                  ? (isFoil ? '✨ Create & Add Foil' : '✨ Create & Add')
+                  : (isFoil ? 'Add Foil to Deck' : 'Add to Deck')}
             </button>
           </div>
         </div>

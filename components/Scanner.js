@@ -46,10 +46,10 @@ function buildScryfallQuery({ name, colors, cardType, cmc, rarity }) {
 
 // ── Auto-scan tuning ─────────────────────────────────────────────────────────
 const FRAME_MS         = 150;  // how often to sample (ms)
-const FRAMES_PREVIEW   = 3;    // stable frames before showing green (~450ms)
-const FRAMES_TRIGGER   = 5;    // stable frames before firing scan (~750ms)
-const MOTION_THRESH    = 22;   // avg pixel diff considered "still" (raised: 12 was too strict for hand-held)
-const COOLDOWN_MS      = 1800; // pause after a failed scan
+const FRAMES_PREVIEW   = 2;    // stable frames before showing green (~300ms)
+const FRAMES_TRIGGER   = 4;    // stable frames before firing scan (~600ms)
+const MOTION_THRESH    = 30;   // avg pixel diff considered "still" — higher = more wiggle room for hand-held
+const COOLDOWN_MS      = 1500; // pause after a failed scan
 const SUCCESS_COOLDOWN = 900;  // brief pause after an auto-add (Quick Scan) before re-arming
 
 export default function Scanner({
@@ -105,6 +105,7 @@ export default function Scanner({
   const canvasRef        = useRef(null);
   const sampleCanvasRef  = useRef(null); // tiny offscreen canvas for motion sampling
   const pendingCardRef   = useRef(null);
+  const pendingFoilRef   = useRef(false);
   const searchDebounceRef = useRef(null);
   const cooldownTimerRef = useRef(null);
 
@@ -426,10 +427,11 @@ export default function Scanner({
     return data;
   };
 
-  const doAddCard = async (card, deckId) => {
+  const doAddCard = async (card, deckId, isFoil = false) => {
+    // A foil and a non-foil of the same printing are tracked as separate lines.
     const { data: existing, error: selErr } = await supabase
       .from('deck_cards').select('id, quantity')
-      .eq('deck_id', deckId).eq('scryfall_id', card.scryfall_id).maybeSingle();
+      .eq('deck_id', deckId).eq('scryfall_id', card.scryfall_id).eq('is_foil', isFoil).maybeSingle();
     if (selErr) { showToast('Failed to check deck: ' + selErr.message, 'error'); return false; }
     if (existing) {
       const { error } = await supabase.from('deck_cards')
@@ -439,25 +441,26 @@ export default function Scanner({
       const { error } = await supabase.from('deck_cards').insert({
         deck_id: deckId, scryfall_id: card.scryfall_id,
         card_name: card.card_name, quantity: 1,
-        is_commander: false, is_partner: false,
+        is_commander: false, is_partner: false, is_foil: isFoil,
       });
       if (error) { showToast('Failed to add card: ' + error.message, 'error'); return false; }
     }
     const targetDeck = decks.find((d) => d.id === deckId);
-    showToast(`✓ ${card.card_name} added to ${targetDeck?.name || 'deck'}`, 'success');
+    showToast(`✓ ${card.card_name}${isFoil ? ' (Foil)' : ''} added to ${targetDeck?.name || 'deck'}`, 'success');
     if (navigator.vibrate) navigator.vibrate(50);
     setResult(null);
     return true;
   };
 
-  const addCardToDeck = async (card, deckId) => {
+  const addCardToDeck = async (card, deckId, isFoil = false) => {
     if (deckId === NEW_DECK || !deckId) {
       pendingCardRef.current = card;
+      pendingFoilRef.current = isFoil;
       setFormHasCard(true);
       setShowNewDeckForm(true);
       return;
     }
-    await doAddCard(card, deckId);
+    await doAddCard(card, deckId, isFoil);
   };
 
   const closeNewDeckForm = () => {
@@ -465,6 +468,7 @@ export default function Scanner({
     setNewDeckName('');
     setFormHasCard(false);
     pendingCardRef.current = null;
+    pendingFoilRef.current = false;
     quickScanPendingRef.current = false; // cancelling the form abandons a pending Quick Scan
   };
 
@@ -495,9 +499,11 @@ export default function Scanner({
     const newDeck = await createNewDeck(newDeckName, newDeckFormat);
     if (newDeck) {
       const pending = pendingCardRef.current;
+      const pendingFoil = pendingFoilRef.current;
       pendingCardRef.current = null;
+      pendingFoilRef.current = false;
       if (pending) {
-        await doAddCard(pending, newDeck.id); // also clears result via setResult(null)
+        await doAddCard(pending, newDeck.id, pendingFoil); // also clears result via setResult(null)
       } else if (!quickScanPendingRef.current) {
         showToast(`✓ "${newDeck.name}" created — ready to add cards`, 'success');
       }
@@ -528,8 +534,8 @@ export default function Scanner({
     scanState === 'stable'   ? 'Hold still…' :
     scanState === 'cooldown' ? (quickScan ? 'Added · swap in the next card' : 'Trying again shortly…') :
     scanCount >= scanLimit   ? '' :
-    quickScan                ? 'Auto-scanning · hold a card steady' :
-    'Hold card steady · tap to scan';
+    quickScan                ? 'Auto-scanning · fit the whole card in frame' :
+    'Fit the whole card in frame · tap to scan';
 
   const vfTextColor =
     scanState === 'scanning' ? '#f59e0b' :
@@ -714,7 +720,7 @@ export default function Scanner({
             <>
               {/* Targeting rectangle — pointer-events-none so taps fall through to the scan btn */}
               <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                <div style={{ position: 'relative', width: 280, height: 190 }}>
+                <div style={{ position: 'relative', width: 232, height: 324 }}>
 
                   {/* Outer glow border */}
                   <div style={{
