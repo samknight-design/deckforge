@@ -25,13 +25,20 @@ npm run lint
 
 ## Architecture
 
-- `app/(app)/` — authed routes (decks, decks/[id], scan, profile) behind a shared layout
+- `app/(app)/` — authed routes (home, decks, decks/[id], scan, profile, community, community/[id]) behind a shared layout. `/home` is the default landing tab.
 - `app/welcome` + `app/login` — entry / auth (welcome is the first-visit landing)
 - `app/api/scan` — POST image → Claude vision returns `{name, set_code, collector_number}` (JSON) →
   resolve EXACT printing via Scryfall (set/number → name+set → name fallback, with name-match
   validation) → cached in `card_cache` by `scryfall_id`. Captures the actual printing (art/set/price)
 - `app/api/scryfall/*` — search/card/autocomplete/import (autocomplete/card/search use **Edge runtime**)
-- `app/api/insights` — Claude-generated deck analysis
+- `app/api/insights` — Claude-generated deck analysis. Returns **structured JSON** (`data`: bracket,
+  power_level, cards_to_add/remove, strengths/weaknesses, summary/strategy), stored in `insights.data`,
+  and stamps `decks.bracket`. `InsightsSheet` renders a dashboard (falls back to markdown for legacy rows).
+- `app/api/decks/like` + `app/api/decks/clone` — toggle a like (maintains `decks.like_count`) / clone a
+  public deck into your account (free-tier cap enforced). Both use the service client.
+- **Community**: `/community` (browse public decks) + `/community/[id]` (read-only view: like, export
+  decklist, clone). Public reads use `createServiceClient()` with explicit `is_public=true` filters; the
+  DB also has "Public decks visible to all" RLS as a backstop. `deck_likes` table holds per-user likes.
 - `app/api/stripe/*` — checkout, portal, webhook
 - `middleware.js` — routes anon users into the app + /login for conversion; bounces fully-authed users off welcome/login
 - `lib/supabase/` — `createClient()` (browser & SSR cookie-based) and `createServiceClient()` (service-role, server-only)
@@ -89,8 +96,8 @@ STRIPE_WEBHOOK_SECRET      # placeholder
   component, otherwise React remounts the subtree every render (bit us with `TopBar`).
 - Supabase embedded joins (`select('card_cache(...)')`) **silently return null** without a
   real FK. We fetch separately and merge in JS for deck cards + insights.
-- PWA: `manifest.json` `start_url` is `/decks`; service worker is `public/sw.js` (bump cache
-  version `vN` to invalidate existing installs). Browsers cache `start_url` at install time —
+- PWA: `manifest.json` `start_url` is `/home`; service worker is `public/sw.js` (currently `v3` — bump
+  cache version `vN` to invalidate existing installs). Browsers cache `start_url` at install time —
   changing it needs the user to remove & re-add the home-screen shortcut.
 - Prices shown in EUR primarily, USD secondary.
 - Commit messages: descriptive multi-line, `Co-Authored-By: Claude`. Commit in discrete chunks.
@@ -104,3 +111,6 @@ STRIPE_WEBHOOK_SECRET      # placeholder
       steady surface → harmless error toast + cooldown, no scan consumed)
 - [ ] `deck_cards.is_foil` (boolean, default false) added for the manual foil toggle. Import flow
       (`/api/scryfall/import`) still adds non-foil only.
+- [ ] **Community moderation**: public decks/likes have no reporting/abuse handling yet — add before
+      wider launch. Brackets (`decks.bracket`), likes (`deck_likes`, `decks.like_count`) and
+      `insights.data` were added 2026-05-29.
