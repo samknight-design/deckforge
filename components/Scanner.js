@@ -45,11 +45,12 @@ function buildScryfallQuery({ name, colors, cardType, cmc, rarity }) {
 }
 
 // ── Auto-scan tuning ─────────────────────────────────────────────────────────
-const FRAME_MS        = 150;   // how often to sample (ms)
-const FRAMES_PREVIEW  = 3;     // stable frames before showing green (~450ms)
-const FRAMES_TRIGGER  = 5;     // stable frames before firing scan (~750ms)
-const MOTION_THRESH   = 22;    // avg pixel diff considered "still" (raised: 12 was too strict for hand-held)
-const COOLDOWN_MS     = 1800;  // pause after a failed scan
+const FRAME_MS         = 150;  // how often to sample (ms)
+const FRAMES_PREVIEW   = 3;    // stable frames before showing green (~450ms)
+const FRAMES_TRIGGER   = 5;    // stable frames before firing scan (~750ms)
+const MOTION_THRESH    = 22;   // avg pixel diff considered "still" (raised: 12 was too strict for hand-held)
+const COOLDOWN_MS      = 1800; // pause after a failed scan
+const SUCCESS_COOLDOWN = 900;  // brief pause after an auto-add (Quick Scan) before re-arming
 
 export default function Scanner({
   decks: initialDecks,
@@ -76,6 +77,10 @@ export default function Scanner({
   const [cameraError, setCameraError]   = useState('');
   const [isOnline, setIsOnline]         = useState(true);
   const [scanState, setScanState]       = useState('idle'); // idle | stable | scanning | cooldown
+
+  // ── Quick Scan (Pro only) ────────────────────────────
+  const [quickScan, setQuickScan]           = useState(false); // auto-scan + auto-add, no confirm prompt
+  const [quickScanCount, setQuickScanCount] = useState(0);     // session counter, starts at 0
 
   // ── Search state ─────────────────────────────────────
   const [searchName, setSearchName]           = useState('');
@@ -116,10 +121,19 @@ export default function Scanner({
   const scanLimitRef     = useRef(tier === 'pro' ? Infinity : 25);
   const cameraReadyRef   = useRef(false);
 
+  // ── Quick-scan refs (avoid stale-closure issues) ──────
+  const quickScanRef     = useRef(false);
+  const activeDeckIdRef  = useRef(initialDeckId || initialDecks[0]?.id || NEW_DECK);
+  const formOpenRef      = useRef(false); // pause auto-scan while the new-deck form is open
+  const requireMotionRef = useRef(false); // after an auto-add, wait for the card to be swapped
+  const quickScanPendingRef = useRef(false); // turn Quick Scan on once a new deck is created
+  const autoAddRef       = useRef(null);  // latest-callback ref for adding without a prompt
+
   const supabase = createClient();
   const router   = useRouter();
 
   const scanLimit  = tier === 'pro' ? Infinity : 25;
+  const isPro      = tier === 'pro';
   const activeDeck = decks.find((d) => d.id === activeDeckId);
   const isNewDeck  = activeDeckId === NEW_DECK;
 
@@ -127,6 +141,9 @@ export default function Scanner({
   useEffect(() => { scanCountRef.current = scanCount; }, [scanCount]);
   useEffect(() => { cameraReadyRef.current = cameraReady; }, [cameraReady]);
   useEffect(() => { scanLimitRef.current = tier === 'pro' ? Infinity : 25; }, [tier]);
+  useEffect(() => { quickScanRef.current = quickScan; }, [quickScan]);
+  useEffect(() => { activeDeckIdRef.current = activeDeckId; }, [activeDeckId]);
+  useEffect(() => { formOpenRef.current = showNewDeckForm; }, [showNewDeckForm]);
   useEffect(() => {
     hasResultRef.current = !!result;
     if (!result) {
@@ -219,15 +236,15 @@ export default function Scanner({
     return new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.92));
   };
 
-  // Pause detection briefly after a failed scan, then resume
-  const startCooldown = useCallback(() => {
+  // Pause detection briefly (after a failed scan, or after a Quick Scan auto-add), then resume
+  const startCooldown = useCallback((ms = COOLDOWN_MS) => {
     inCooldownRef.current = true;
     updateScanState('cooldown');
     clearTimeout(cooldownTimerRef.current);
     cooldownTimerRef.current = setTimeout(() => {
       inCooldownRef.current = false;
       updateScanState('idle');
-    }, COOLDOWN_MS);
+    }, ms);
   }, [updateScanState]);
 
   // Clear any pending cooldown timer on unmount
@@ -254,10 +271,26 @@ export default function Scanner({
       const data = await res.json();
 
       if (res.ok && data.card) {
-        setResult(data.card);
         setScanCount((c) => c + 1);
-        if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
-        updateScanState('idle');
+
+        // Quick Scan: auto-add to the pre-selected deck, no confirm prompt.
+        if (quickScanRef.current && autoAddRef.current) {
+          const added = await autoAddRef.current(data.card); // doAddCard handles its own toast + haptic
+          if (added) {
+            setQuickScanCount((c) => c + 1);
+            // Require the card to be swapped out before arming the next scan,
+            // so a card left in frame isn't added repeatedly.
+            requireMotionRef.current = true;
+            startCooldown(SUCCESS_COOLDOWN);
+          } else {
+            startCooldown();
+          }
+        } else {
+          // Normal mode: surface the confirmation sheet.
+          setResult(data.card);
+          if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+          updateScanState('idle');
+        }
       } else {
         showToast(data.error || 'Card not recognized — try repositioning', 'error');
         startCooldown();
@@ -283,8 +316,17 @@ export default function Scanner({
   // This effect runs after every render so frameCheckCbRef always
   // holds fresh closures without the interval needing extra deps.
   useEffect(() => {
+    // Keep a fresh add-without-prompt callback for Quick Scan auto-adds.
+    autoAddRef.current = async (card) => {
+      const deckId = activeDeckIdRef.current;
+      if (!deckId || deckId === NEW_DECK) return false;
+      return await doAddCard(card, deckId);
+    };
+
     frameCheckCbRef.current = () => {
-      if (isScanningRef.current || inCooldownRef.current || hasResultRef.current) {
+      // Auto-fire only runs in Quick Scan; normal mode is manual tap-to-scan.
+      if (!quickScanRef.current) return;
+      if (isScanningRef.current || inCooldownRef.current || hasResultRef.current || formOpenRef.current) {
         stableFramesRef.current = 0;
         return;
       }
@@ -304,6 +346,14 @@ export default function Scanner({
       }
       const avgDiff = n > 0 ? diff / n : 999;
 
+      // After an auto-add, wait until the card is swapped out (motion seen)
+      // before arming again — otherwise a card left in frame re-adds forever.
+      if (requireMotionRef.current) {
+        stableFramesRef.current = 0;
+        if (avgDiff >= MOTION_THRESH) requireMotionRef.current = false;
+        return;
+      }
+
       if (avgDiff < MOTION_THRESH) {
         stableFramesRef.current = Math.min(stableFramesRef.current + 1, FRAMES_TRIGGER);
 
@@ -322,19 +372,20 @@ export default function Scanner({
     };
   }); // intentionally no deps — keeps cb fresh every render
 
-  // Start / stop the frame-check interval
+  // Start / stop the frame-check interval — only needed while Quick Scan is on.
   useEffect(() => {
-    if (mode !== 'Scan' || !cameraReady || !isOnline) {
+    if (mode !== 'Scan' || !cameraReady || !isOnline || !quickScan) {
       clearInterval(frameIntervalRef.current);
       stableFramesRef.current = 0;
       prevFrameRef.current    = null;
+      requireMotionRef.current = false;
       return;
     }
     frameIntervalRef.current = setInterval(() => {
       frameCheckCbRef.current?.();
     }, FRAME_MS);
     return () => clearInterval(frameIntervalRef.current);
-  }, [mode, cameraReady, isOnline]);
+  }, [mode, cameraReady, isOnline, quickScan]);
 
   // ── Search ────────────────────────────────────────────
   const runSearch = useCallback(async (name, colors, cardType, cmc, rarity) => {
@@ -414,6 +465,28 @@ export default function Scanner({
     setNewDeckName('');
     setFormHasCard(false);
     pendingCardRef.current = null;
+    quickScanPendingRef.current = false; // cancelling the form abandons a pending Quick Scan
+  };
+
+  // Begin a Quick Scan run once we have a real destination deck.
+  const startQuickScanRun = () => {
+    setQuickScanCount(0);
+    requireMotionRef.current = false;
+    setQuickScan(true);
+  };
+
+  // Pro-only: flip Quick Scan on/off. Turning on requires a real deck —
+  // if "New Deck" is selected, create one first, then start.
+  const toggleQuickScan = () => {
+    if (quickScan) { setQuickScan(false); return; }
+    if (isNewDeck || !activeDeckId) {
+      quickScanPendingRef.current = true;
+      pendingCardRef.current = null;
+      setFormHasCard(false);
+      setShowNewDeckForm(true);
+      return;
+    }
+    startQuickScanRun();
   };
 
   const handleNewDeckSubmit = async (e) => {
@@ -425,8 +498,14 @@ export default function Scanner({
       pendingCardRef.current = null;
       if (pending) {
         await doAddCard(pending, newDeck.id); // also clears result via setResult(null)
-      } else {
+      } else if (!quickScanPendingRef.current) {
         showToast(`✓ "${newDeck.name}" created — ready to add cards`, 'success');
+      }
+      // If Quick Scan was waiting on a destination deck, start it now.
+      if (quickScanPendingRef.current) {
+        quickScanPendingRef.current = false;
+        showToast(`⚡ Quick Scan on — scanning into "${newDeck.name}"`, 'success');
+        startQuickScanRun();
       }
     }
     closeNewDeckForm();
@@ -447,8 +526,9 @@ export default function Scanner({
   const vfText =
     scanState === 'scanning' ? 'Identifying card…' :
     scanState === 'stable'   ? 'Hold still…' :
-    scanState === 'cooldown' ? 'Trying again shortly…' :
+    scanState === 'cooldown' ? (quickScan ? 'Added · swap in the next card' : 'Trying again shortly…') :
     scanCount >= scanLimit   ? '' :
+    quickScan                ? 'Auto-scanning · hold a card steady' :
     'Hold card steady · tap to scan';
 
   const vfTextColor =
@@ -539,10 +619,42 @@ export default function Scanner({
               minHeight: 36,
             }}
           >
-            {m === 'Scan' ? '📷 Scan' : '🔍 Search'}
+            {m === 'Scan' ? '📷 Scan' : '➕ Add Card'}
           </button>
         ))}
       </div>
+
+      {/* Quick Scan toggle — Pro only, Scan mode only */}
+      {mode === 'Scan' && isPro && (
+        <button
+          onClick={toggleQuickScan}
+          className="w-full flex items-center justify-between rounded-xl px-3 py-2 mt-2"
+          style={{
+            background: quickScan ? 'rgba(124,58,237,0.18)' : 'rgba(17,24,39,0.92)',
+            border: `1px solid ${quickScan ? '#7c3aed' : '#1e2d47'}`,
+            minHeight: 40,
+          }}
+        >
+          <span className="flex items-center gap-2 text-sm font-semibold" style={{ color: quickScan ? '#c4b5fd' : '#f1f5f9' }}>
+            ⚡ Quick Scan
+            {quickScan && (
+              <span className="text-xs font-medium" style={{ color: '#a78bfa' }}>
+                · {quickScanCount} added
+              </span>
+            )}
+          </span>
+          {/* Switch track */}
+          <span
+            className="relative rounded-full transition-colors"
+            style={{ width: 40, height: 22, background: quickScan ? '#7c3aed' : '#334155', flexShrink: 0 }}
+          >
+            <span
+              className="absolute rounded-full bg-white transition-all"
+              style={{ width: 18, height: 18, top: 2, left: quickScan ? 20 : 2 }}
+            />
+          </span>
+        </button>
+      )}
     </>
   );
 
@@ -689,42 +801,50 @@ export default function Scanner({
                   />
                 </label>
 
-                {/* Scan button — manual override or visual confirmation */}
-                <button
-                  onPointerDown={() => doScan()}
-                  disabled={scanning || scanCount >= scanLimit || !cameraReady}
-                  className="flex items-center gap-2 rounded-full font-bold text-sm disabled:opacity-50 transition-all active:scale-95 flex-shrink-0"
-                  style={{
-                    paddingLeft: 28, paddingRight: 28, height: 56,
-                    minWidth: 170, justifyContent: 'center',
-                    background:
-                      scanState === 'stable'   ? '#10b981' :
-                      scanState === 'scanning' ? 'rgba(245,158,11,0.55)' :
-                      '#f59e0b',
-                    color: '#0a0e1a',
-                    boxShadow:
-                      scanState === 'stable' ? '0 4px 24px rgba(16,185,129,0.55)' :
-                      '0 4px 20px rgba(245,158,11,0.4)',
-                    transition: 'background 0.25s ease, box-shadow 0.25s ease',
-                  }}
-                >
-                  {scanState === 'scanning' ? (
-                    <>
-                      <div style={{
-                        width: 16, height: 16, borderRadius: '50%',
-                        border: '2px solid rgba(10,14,26,0.4)',
-                        borderTopColor: '#0a0e1a',
-                        animation: 'spin 0.8s linear infinite',
-                        flexShrink: 0,
-                      }} />
-                      Scanning…
-                    </>
-                  ) : scanState === 'stable' ? (
-                    '✨ Auto-scanning…'
-                  ) : (
-                    '⚡ Tap to Scan'
-                  )}
-                </button>
+                {/* Quick Scan: a Stop button (auto-fire is running) — otherwise a manual Tap-to-Scan button */}
+                {quickScan ? (
+                  <button
+                    onPointerDown={() => setQuickScan(false)}
+                    className="flex items-center gap-2 rounded-full font-bold text-sm transition-all active:scale-95 flex-shrink-0"
+                    style={{
+                      paddingLeft: 28, paddingRight: 28, height: 56,
+                      minWidth: 170, justifyContent: 'center',
+                      background: '#7c3aed', color: '#fff',
+                      boxShadow: '0 4px 20px rgba(124,58,237,0.45)',
+                    }}
+                  >
+                    ■ Stop · {quickScanCount} added
+                  </button>
+                ) : (
+                  <button
+                    onPointerDown={() => doScan()}
+                    disabled={scanning || scanCount >= scanLimit || !cameraReady}
+                    className="flex items-center gap-2 rounded-full font-bold text-sm disabled:opacity-50 transition-all active:scale-95 flex-shrink-0"
+                    style={{
+                      paddingLeft: 28, paddingRight: 28, height: 56,
+                      minWidth: 170, justifyContent: 'center',
+                      background: scanState === 'scanning' ? 'rgba(245,158,11,0.55)' : '#f59e0b',
+                      color: '#0a0e1a',
+                      boxShadow: '0 4px 20px rgba(245,158,11,0.4)',
+                      transition: 'background 0.25s ease, box-shadow 0.25s ease',
+                    }}
+                  >
+                    {scanState === 'scanning' ? (
+                      <>
+                        <div style={{
+                          width: 16, height: 16, borderRadius: '50%',
+                          border: '2px solid rgba(10,14,26,0.4)',
+                          borderTopColor: '#0a0e1a',
+                          animation: 'spin 0.8s linear infinite',
+                          flexShrink: 0,
+                        }} />
+                        Scanning…
+                      </>
+                    ) : (
+                      '⚡ Tap to Scan'
+                    )}
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -757,7 +877,7 @@ export default function Scanner({
               <input
                 type="text" value={searchName}
                 onChange={(e) => setSearchName(e.target.value)}
-                placeholder="Card name…"
+                placeholder="Search any Magic card to add…"
                 autoFocus
                 className="w-full rounded-xl px-4 py-3 text-sm outline-none"
                 style={{ background: '#111827', border: '1px solid #1e2d47', color: '#f1f5f9', minHeight: 44 }}
@@ -873,7 +993,8 @@ export default function Scanner({
             {!searchLoading && searchResults.length === 0 && !searchName && !filterColors.length && !filterType && !filterCmc && !filterRarity && (
               <div className="flex flex-col items-center justify-center py-12 text-center px-6">
                 <div className="text-4xl mb-3">🃏</div>
-                <p className="text-sm" style={{ color: '#64748b' }}>Search by name, color, type, CMC or rarity</p>
+                <p className="text-sm font-medium mb-1" style={{ color: '#94a3b8' }}>Add any Magic card to your deck</p>
+                <p className="text-xs" style={{ color: '#64748b' }}>Search all of Scryfall by name, colour, type, CMC or rarity — tap a result to add it.</p>
               </div>
             )}
             {searchResults.map((card) => (
@@ -899,6 +1020,13 @@ export default function Scanner({
                     €{parseFloat(card.price_eur).toFixed(2)}
                   </span>
                 )}
+                {/* Add affordance — makes it clear tapping adds the card to a deck */}
+                <span
+                  className="flex items-center justify-center rounded-full flex-shrink-0 font-bold"
+                  style={{ width: 28, height: 28, background: 'rgba(245,158,11,0.15)', color: '#f59e0b', fontSize: 18, lineHeight: 1 }}
+                >
+                  +
+                </span>
               </button>
             ))}
           </div>
