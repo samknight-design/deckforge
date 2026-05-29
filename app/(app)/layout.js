@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import BottomNav from '@/components/BottomNav';
 import ToastContainer from '@/components/Toast';
+import RewardToast from '@/components/RewardToast';
 import AnonBanner from '@/components/AnonBanner';
 
 export default async function AppLayout({ children }) {
@@ -22,6 +23,7 @@ export default async function AppLayout({ children }) {
       </main>
       <BottomNav />
       <ToastContainer />
+      <RewardToast />
     </div>
   );
 }

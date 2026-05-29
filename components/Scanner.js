@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { showToast } from './Toast';
+import { showReward } from './RewardToast';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -273,6 +274,7 @@ export default function Scanner({
 
       if (res.ok && data.card) {
         setScanCount((c) => c + 1);
+        showReward(data.rewards);
 
         // Quick Scan: auto-add to the pre-selected deck, no confirm prompt.
         if (quickScanRef.current && autoAddRef.current) {

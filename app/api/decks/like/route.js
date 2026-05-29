@@ -53,12 +53,13 @@ export async function POST(request) {
     await svc.from('decks').update({ like_count }).eq('id', deckId);
 
     // XP only on liking (not unliking), and never for liking your own deck.
+    let rewards = null;
     if (liked && deck.user_id !== user.id) {
-      await recordEvent(svc, user.id, 'like_given');
+      rewards = await recordEvent(svc, user.id, 'like_given');
       await recordEvent(svc, deck.user_id, 'like_received');
     }
 
-    return NextResponse.json({ liked, like_count });
+    return NextResponse.json({ liked, like_count, rewards });
   } catch (err) {
     console.error('Like error:', err);
     return NextResponse.json({ error: 'Failed to update like' }, { status: 500 });

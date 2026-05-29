@@ -11,7 +11,7 @@ export default async function Profile() {
   const monthYear = monthKey();
   const wk = weekKey();
 
-  const [{ data: profile }, { data: usage }, { data: decks }, { data: ach }, { data: tasks }] = await Promise.all([
+  const [{ data: profile }, { data: usage }, { data: decks }, { data: ach }, { data: tasks }, { data: challenges }] = await Promise.all([
     supabase.from('profiles').select('*').eq('id', user.id).single(),
     supabase.from('usage').select('scan_count, insight_count').eq('user_id', user.id).eq('month_year', monthYear).maybeSingle(),
     supabase.from('decks')
@@ -20,6 +20,7 @@ export default async function Profile() {
       .order('like_count', { ascending: false }),
     supabase.from('user_achievements').select('achievement_key').eq('user_id', user.id),
     supabase.from('user_tasks').select('task_key, period_key, progress, claimed').eq('user_id', user.id).in('period_key', [wk, monthYear]),
+    supabase.from('challenges').select('key, name, icon, period, target, xp').eq('active', true).order('sort'),
   ]);
 
   const allDecks = decks || [];
@@ -35,6 +36,7 @@ export default async function Profile() {
       totalLikes={totalLikes}
       achievementKeys={(ach || []).map((a) => a.achievement_key)}
       tasks={tasks || []}
+      challenges={challenges || []}
       weekKeyStr={wk}
       monthKeyStr={monthYear}
     />

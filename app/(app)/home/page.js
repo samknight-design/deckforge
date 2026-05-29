@@ -8,7 +8,7 @@ export default async function Home() {
 
   // Rank public decks by likes in the last 7 days, tie-broken by all-time likes.
   const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const [{ data: recentLikes }, { data: publicDecks }] = await Promise.all([
+  const [{ data: recentLikes }, { data: publicDecks }, { data: news }] = await Promise.all([
     svc.from('deck_likes').select('deck_id').gte('created_at', weekAgo),
     svc
       .from('decks')
@@ -16,6 +16,7 @@ export default async function Home() {
       .eq('is_public', true)
       .order('like_count', { ascending: false })
       .limit(50),
+    svc.from('news_items').select('kind, title, body, url').eq('published', true).order('sort'),
   ]);
 
   const weeklyCounts = {};
@@ -33,5 +34,5 @@ export default async function Home() {
   // Backfill with top all-time public decks
   (publicDecks || []).forEach((d) => { if (!seen.has(d.id)) { topDecks.push(d); seen.add(d.id); } });
 
-  return <HomePage topDecks={topDecks.slice(0, 8)} />;
+  return <HomePage topDecks={topDecks.slice(0, 8)} news={news || []} />;
 }

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { showReward } from './RewardToast';
 
 export default function LikeButton({ deckId, initialLiked = false, initialCount = 0, size = 'md' }) {
   const [liked, setLiked] = useState(initialLiked);
@@ -25,6 +26,7 @@ export default function LikeButton({ deckId, initialLiked = false, initialCount 
       if (res.ok) {
         setLiked(data.liked);
         setCount(data.like_count);
+        showReward(data.rewards);
       } else {
         setLiked(prevLiked);
         setCount(prevCount);

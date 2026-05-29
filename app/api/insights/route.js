@@ -205,7 +205,7 @@ Provide 3-5 items each in strengths, weaknesses, cards_to_add and cards_to_remov
       .eq('id', deckId);
 
     await consumeInsight(serviceClient, user.id, tier);
-    await recordEvent(serviceClient, user.id, 'insight');
+    const rewards = await recordEvent(serviceClient, user.id, 'insight');
 
     return NextResponse.json({
       content,
@@ -213,6 +213,7 @@ Provide 3-5 items each in strengths, weaknesses, cards_to_add and cards_to_remov
       bracket_estimate: bracketEstimate,
       generated_at: savedInsight?.generated_at || new Date().toISOString(),
       cached: false,
+      rewards,
     });
   } catch (err) {
     console.error('Insights error:', err);

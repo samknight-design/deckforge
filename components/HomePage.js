@@ -1,5 +1,8 @@
 import Link from 'next/link';
 import { BRACKET_COLORS } from '@/lib/brackets';
+import { TIERS, TIER_ORDER, BOLT_ONS, CURRENCY } from '@/lib/tiers';
+
+const fmtPrice = (p) => `${CURRENCY}${p.toFixed(2)}`;
 
 // Curated MTG resources (official links open in a new tab).
 const RESOURCES = [
@@ -47,7 +50,8 @@ const QUICK_LINKS = [
   { href: '/community', icon: '🌐', label: 'Community' },
 ];
 
-export default function HomePage({ topDecks }) {
+export default function HomePage({ topDecks, news }) {
+  const updates = (news && news.length) ? news : WHATS_NEW;
   return (
     <div className="h-full overflow-y-auto" style={{ background: '#0a0e1a' }}>
       {/* Hero */}
@@ -114,19 +118,55 @@ export default function HomePage({ topDecks }) {
         </div>
       </div>
 
+      {/* Plans & top-ups */}
+      <div className="px-4 mb-6">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-bold text-white">⚡ Upgrade</h2>
+          <Link href="/profile" className="text-xs font-medium" style={{ color: '#f59e0b' }}>Manage →</Link>
+        </div>
+        <div className="grid grid-cols-2 gap-2 mb-2">
+          {['pro', 'legendary'].map((key) => {
+            const t = TIERS[key];
+            return (
+              <Link key={key} href="/profile" className="rounded-2xl p-3" style={{ background: '#111827', border: `1px solid ${t.color}55` }}>
+                <div className="font-bold text-sm" style={{ color: t.color }}>{t.icon} {t.name}</div>
+                <div className="text-lg font-bold text-white mt-0.5">{fmtPrice(t.price)}<span className="text-xs font-normal" style={{ color: '#64748b' }}>/mo</span></div>
+                <div className="text-xs mt-1" style={{ color: '#94a3b8' }}>{t.scans.toLocaleString()} scans · {t.insights} insights</div>
+              </Link>
+            );
+          })}
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {BOLT_ONS.map((b) => (
+            <Link key={b.key} href="/profile" className="rounded-xl p-2.5 flex items-center justify-between" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
+              <span className="text-xs font-semibold text-white">{b.label}</span>
+              <span className="text-xs font-semibold" style={{ color: '#10b981' }}>{fmtPrice(b.price)}</span>
+            </Link>
+          ))}
+        </div>
+      </div>
+
       {/* What's new */}
       <div className="px-4 pb-8">
         <h2 className="text-sm font-bold text-white mb-2">✨ What's new</h2>
         <div className="rounded-xl overflow-hidden" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
-          {WHATS_NEW.map((n, i) => (
-            <div key={i} className="px-3 py-2.5" style={{ borderBottom: i < WHATS_NEW.length - 1 ? '1px solid #1e2d47' : 'none' }}>
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-white">{n.title}</span>
-                <span className="text-xs" style={{ color: '#475569' }}>{n.date}</span>
-              </div>
-              <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>{n.body}</p>
-            </div>
-          ))}
+          {updates.map((n, i) => {
+            const inner = (
+              <>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-white">{n.title}</span>
+                  {n.kind === 'news' && <span className="text-xs rounded px-1.5" style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b' }}>News</span>}
+                </div>
+                {n.body && <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>{n.body}</p>}
+              </>
+            );
+            const style = { borderBottom: i < updates.length - 1 ? '1px solid #1e2d47' : 'none' };
+            return n.url ? (
+              <a key={i} href={n.url} target="_blank" rel="noopener noreferrer" className="block px-3 py-2.5" style={style}>{inner}</a>
+            ) : (
+              <div key={i} className="px-3 py-2.5" style={style}>{inner}</div>
+            );
+          })}
         </div>
       </div>
     </div>

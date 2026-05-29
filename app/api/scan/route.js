@@ -142,7 +142,7 @@ export async function POST(request) {
       serviceClient.from('card_cache').upsert(card, { onConflict: 'scryfall_id' }),
       consumeScan(serviceClient, user.id, tier),
     ]);
-    await recordEvent(serviceClient, user.id, 'scan');
+    const rewards = await recordEvent(serviceClient, user.id, 'scan');
 
     return NextResponse.json({
       card: {
@@ -163,6 +163,7 @@ export async function POST(request) {
         set_code: card.set_code,
         set_name: card.set_name,
       },
+      rewards,
     });
   } catch (err) {
     console.error('Scan error:', err);

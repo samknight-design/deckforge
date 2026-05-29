@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -9,7 +9,7 @@ import Avatar from './Avatar';
 import {
   TIERS, TIER_ORDER, BOLT_ONS, AVATARS, CURRENCY,
   scanQuota, insightQuota, deckLimit, levelProgress,
-  ACHIEVEMENTS, TASKS,
+  ACHIEVEMENTS,
 } from '@/lib/tiers';
 
 const APP_VERSION = '1.1.0';
@@ -25,9 +25,13 @@ function StatTile({ label, value, sub, color }) {
   );
 }
 
-export default function ProfilePage({ profile, usage, deckCount, publicDecks, totalLikes, achievementKeys, tasks, weekKeyStr, monthKeyStr }) {
+export default function ProfilePage({ profile, usage, deckCount, publicDecks, totalLikes, achievementKeys, tasks, challenges, weekKeyStr, monthKeyStr }) {
   const router = useRouter();
   const supabase = createClient();
+
+  // Pull fresh server data on open so XP/credits/challenge progress reflect
+  // recent activity (Next's router cache can otherwise show a stale view).
+  useEffect(() => { router.refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [avatarKey, setAvatarKey] = useState(profile?.avatar_key || null);
   const [showAvatars, setShowAvatars] = useState(false);
@@ -159,15 +163,16 @@ export default function ProfilePage({ profile, usage, deckCount, publicDecks, to
         )}
 
         {/* XP bar */}
-        <div className="mt-4">
+        <Link href="/rewards" className="block mt-4">
           <div className="flex justify-between text-xs mb-1">
             <span style={{ color: '#94a3b8' }}>Level {lvl.level}</span>
-            <span style={{ color: '#64748b' }}>{lvl.into} / {lvl.span} XP</span>
+            <span style={{ color: '#f59e0b' }}>Rewards track →</span>
           </div>
           <div className="h-2 rounded-full overflow-hidden" style={{ background: '#1e2d47' }}>
             <div className="h-full rounded-full" style={{ width: `${Math.min(100, (lvl.into / lvl.span) * 100)}%`, background: 'linear-gradient(90deg,#7c3aed,#f59e0b)' }} />
           </div>
-        </div>
+          <div className="text-xs mt-1" style={{ color: '#64748b' }}>{lvl.into} / {lvl.span} XP to level {lvl.level + 1}</div>
+        </Link>
       </div>
 
       <div className="px-4 py-4 space-y-5">
@@ -186,12 +191,15 @@ export default function ProfilePage({ profile, usage, deckCount, publicDecks, to
         <div>
           <h3 className="text-sm font-semibold text-text-primary mb-2">Challenges</h3>
           <div className="rounded-2xl overflow-hidden" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
-            {TASKS.map((t, i) => {
+            {(challenges || []).length === 0 && (
+              <div className="px-3 py-4 text-center text-xs" style={{ color: '#64748b' }}>No active challenges right now — check back soon.</div>
+            )}
+            {(challenges || []).map((t, i) => {
               const row = taskRow[t.key];
               const progress = Math.min(row?.progress || 0, t.target);
               const done = row?.claimed || progress >= t.target;
               return (
-                <div key={t.key} className="px-3 py-2.5" style={{ borderBottom: i < TASKS.length - 1 ? '1px solid #1e2d47' : 'none' }}>
+                <div key={t.key} className="px-3 py-2.5" style={{ borderBottom: i < challenges.length - 1 ? '1px solid #1e2d47' : 'none' }}>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-sm" style={{ color: '#f1f5f9' }}>{t.icon} {t.name}</span>
                     <span className="text-xs font-semibold" style={{ color: done ? '#10b981' : '#64748b' }}>

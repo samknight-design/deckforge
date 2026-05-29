@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { BRACKET_COLORS, BRACKET_LABELS } from '@/lib/brackets';
+import { showReward } from './RewardToast';
 import CardModal from './CardModal';
 
 function renderMarkdown(text) {
@@ -250,6 +251,7 @@ export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsi
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to generate insights');
       setInsight(data);
+      showReward(data.rewards);
       if (onInsightGenerated) onInsightGenerated(data);
     } catch (err) {
       setError(err.message);

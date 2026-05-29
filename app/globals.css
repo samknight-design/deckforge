@@ -107,6 +107,15 @@ main {
   animation: toast-in 0.25s ease-out;
 }
 
+@keyframes reward-in {
+  from { transform: translateY(16px) scale(0.96); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+.reward-enter {
+  animation: reward-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 /* No user select on interactive elements */
 button, a {
   user-select: none;
