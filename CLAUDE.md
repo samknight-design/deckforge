@@ -27,7 +27,9 @@ npm run lint
 
 - `app/(app)/` — authed routes (decks, decks/[id], scan, profile) behind a shared layout
 - `app/welcome` + `app/login` — entry / auth (welcome is the first-visit landing)
-- `app/api/scan` — POST image → Claude vision returns card name → Scryfall lookup → cached in `card_cache`
+- `app/api/scan` — POST image → Claude vision returns `{name, set_code, collector_number}` (JSON) →
+  resolve EXACT printing via Scryfall (set/number → name+set → name fallback, with name-match
+  validation) → cached in `card_cache` by `scryfall_id`. Captures the actual printing (art/set/price)
 - `app/api/scryfall/*` — search/card/autocomplete/import (autocomplete/card/search use **Edge runtime**)
 - `app/api/insights` — Claude-generated deck analysis
 - `app/api/stripe/*` — checkout, portal, webhook
@@ -47,12 +49,20 @@ npm run lint
 
 ## Scanner (`components/Scanner.js`) — the most complex component
 
-Auto-scan via frame-stability detection:
+Two modes:
+- **Normal (default)**: pure manual "Tap to Scan" → `CardResultSheet` confirmation
+  (which has a Foil toggle). Motion auto-fire is OFF here.
+- **Quick Scan (Pro only)**: a toggle that turns on motion auto-fire and auto-adds each
+  scanned card to the pre-selected deck with no prompt, with a live session counter.
+  Requires a real destination deck (creates one first if "New Deck" is selected).
+  After each auto-add it waits for the card to be swapped out (a motion event) before re-arming.
+
+Auto-scan (Quick Scan only) via frame-stability detection:
 - A 150ms `setInterval` samples an 80×60 centre crop into a tiny offscreen canvas
   and compares the R channel against the previous frame.
-- ~450ms still (3 frames) → viewfinder turns green ("Hold still…").
-- ~750ms still (5 frames) → `doScan()` fires automatically. `MOTION_THRESH=22`.
-- 1.8s cooldown after a failed scan. Manual "Tap to Scan" + gallery upload remain as fallbacks.
+- ~300ms still (2 frames) → viewfinder turns green. ~600ms still (4 frames) → `doScan()` fires.
+- `MOTION_THRESH=30` (higher = more hand-held wiggle room). Portrait viewfinder guide.
+- 1.5s cooldown after a failed scan. Gallery upload remains as a fallback.
 - Uses the **latest-callback-ref pattern** (`frameCheckCbRef`) so the interval always
   calls a fresh closure without restarting — guards (`isScanningRef`, `inCooldownRef`,
   `hasResultRef`, etc.) are refs, not state, to stay synchronous and avoid stale closures.
@@ -90,5 +100,7 @@ STRIPE_WEBHOOK_SECRET      # placeholder
 - [ ] **Stripe**: all keys are placeholders — wire up real keys + test checkout/webhook before launch
 - [ ] **Google OAuth verification**: removes the "unverified app" warning on Google sign-in
 - [ ] **CAPTCHA on anonymous sign-in**: recommended before wider launch to prevent abuse
-- [ ] Scanner: consider gating auto-fire when no card is present (currently fires on any steady
-      surface → harmless error toast + cooldown, no scan consumed)
+- [ ] Scanner: consider gating auto-fire when no card is present (Quick Scan currently fires on any
+      steady surface → harmless error toast + cooldown, no scan consumed)
+- [ ] `deck_cards.is_foil` (boolean, default false) added for the manual foil toggle. Import flow
+      (`/api/scryfall/import`) still adds non-foil only.
