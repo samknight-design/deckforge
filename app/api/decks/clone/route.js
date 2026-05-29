@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient, createServiceClient } from '@/lib/supabase/server';
+import { recordEvent } from '@/lib/gamification';
 
 // Clone a PUBLIC deck into the current user's account (a fresh, private,
 // editable copy). Respects the free-tier 1-deck cap.
@@ -76,6 +77,11 @@ export async function POST(request) {
     if (srcCards && srcCards.length) {
       const rows = srcCards.map((c) => ({ ...c, deck_id: newDeck.id }));
       await svc.from('deck_cards').insert(rows);
+    }
+
+    // Reward the original author when someone else clones their deck.
+    if (src.user_id && src.user_id !== user.id) {
+      await recordEvent(svc, src.user_id, 'clone_received');
     }
 
     return NextResponse.json({ deckId: newDeck.id });

@@ -86,12 +86,22 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
     if (!canPublish || togglingPublic) return;
     const next = !isPublic;
     setTogglingPublic(true);
-    const { error } = await supabase.from('decks').update({ is_public: next }).eq('id', deck.id);
-    setTogglingPublic(false);
-    if (error) { showToast('Failed to update visibility', 'error'); return; }
-    setIsPublic(next);
-    setDeck((d) => ({ ...d, is_public: next }));
-    showToast(next ? '✓ Deck is now public' : 'Deck set to private', 'success');
+    try {
+      const res = await fetch('/api/decks/visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deckId: deck.id, isPublic: next }),
+      });
+      const data = await res.json();
+      if (!res.ok) { showToast(data.error || 'Failed to update visibility', 'error'); return; }
+      setIsPublic(next);
+      setDeck((d) => ({ ...d, is_public: next }));
+      showToast(next ? '✓ Deck is now public' : 'Deck set to private', 'success');
+    } catch {
+      showToast('Failed to update visibility', 'error');
+    } finally {
+      setTogglingPublic(false);
+    }
   };
 
   const target = deck.format === 'commander' ? 100 : 60;

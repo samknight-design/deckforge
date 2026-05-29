@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient, createServiceClient } from '@/lib/supabase/server';
+import { recordEvent } from '@/lib/gamification';
 
 // Toggle the current user's like on a PUBLIC deck and return the fresh count.
 export async function POST(request) {
@@ -20,7 +21,7 @@ export async function POST(request) {
     // Only public decks can be liked.
     const { data: deck } = await svc
       .from('decks')
-      .select('id, is_public')
+      .select('id, is_public, user_id')
       .eq('id', deckId)
       .maybeSingle();
     if (!deck || !deck.is_public) {
@@ -50,6 +51,12 @@ export async function POST(request) {
       .eq('deck_id', deckId);
     const like_count = count || 0;
     await svc.from('decks').update({ like_count }).eq('id', deckId);
+
+    // XP only on liking (not unliking), and never for liking your own deck.
+    if (liked && deck.user_id !== user.id) {
+      await recordEvent(svc, user.id, 'like_given');
+      await recordEvent(svc, deck.user_id, 'like_received');
+    }
 
     return NextResponse.json({ liked, like_count });
   } catch (err) {

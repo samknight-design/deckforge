@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createClient, createServiceClient } from '@/lib/supabase/server';
 import { fetchCardByName, fetchCardBySetAndNumber, fetchCardByNameAndSet } from '@/lib/scryfall';
-import { checkScanLimit, incrementScanCount } from '@/lib/usage';
+import { checkScanLimit, consumeScan } from '@/lib/usage';
+import { recordEvent } from '@/lib/gamification';
 import Anthropic from '@anthropic-ai/sdk';
 
 export async function POST(request) {
@@ -37,7 +38,7 @@ export async function POST(request) {
     const limitCheck = await checkScanLimit(serviceClient, user.id, tier);
     if (!limitCheck.allowed) {
       return NextResponse.json(
-        { error: 'Monthly scan limit reached. Upgrade to Pro for unlimited scans.' },
+        { error: 'Scan limit reached. Upgrade your plan or add a scan pack for more.' },
         { status: 429 }
       );
     }
@@ -136,11 +137,12 @@ export async function POST(request) {
       );
     }
 
-    // Cache the resolved printing (keyed by scryfall_id) + count the scan.
+    // Cache the resolved printing, consume a scan (quota then credit), award XP.
     await Promise.all([
       serviceClient.from('card_cache').upsert(card, { onConflict: 'scryfall_id' }),
-      incrementScanCount(serviceClient, user.id),
+      consumeScan(serviceClient, user.id, tier),
     ]);
+    await recordEvent(serviceClient, user.id, 'scan');
 
     return NextResponse.json({
       card: {

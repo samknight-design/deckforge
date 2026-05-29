@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient, createServiceClient } from '@/lib/supabase/server';
-import { checkInsightLimit, incrementInsightCount } from '@/lib/usage';
+import { checkInsightLimit, consumeInsight } from '@/lib/usage';
+import { recordEvent } from '@/lib/gamification';
 import { computeDeckHash } from '@/lib/deckUtils';
 import { normaliseBracket } from '@/lib/brackets';
 import Anthropic from '@anthropic-ai/sdk';
@@ -28,11 +29,7 @@ export async function POST(request) {
         .eq('deck_id', deckId),
     ]);
 
-    const limitCheck = await checkInsightLimit(supabase, user.id, profileResult.data?.tier || 'free');
-    if (!limitCheck.allowed) {
-      return NextResponse.json({ error: 'AI Insights require a Pro subscription.' }, { status: 403 });
-    }
-
+    const tier = profileResult.data?.tier || 'free';
     const deck = deckResult.data;
     const deckError = deckResult.error;
 
@@ -97,6 +94,16 @@ export async function POST(request) {
           });
         }
       }
+    }
+
+    // Metered per tier (cached returns above are free). Quota first, then credits.
+    const serviceLimit = createServiceClient();
+    const limitCheck = await checkInsightLimit(serviceLimit, user.id, tier);
+    if (!limitCheck.allowed) {
+      return NextResponse.json(
+        { error: 'AI Insight limit reached for this month. Upgrade your plan or add an insight pack.' },
+        { status: 429 }
+      );
     }
 
     // Build card list for prompt
@@ -197,7 +204,8 @@ Provide 3-5 items each in strengths, weaknesses, cards_to_add and cards_to_remov
       })
       .eq('id', deckId);
 
-    await incrementInsightCount(serviceClient, user.id);
+    await consumeInsight(serviceClient, user.id, tier);
+    await recordEvent(serviceClient, user.id, 'insight');
 
     return NextResponse.json({
       content,
