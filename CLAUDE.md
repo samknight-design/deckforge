@@ -25,7 +25,13 @@ npm run lint
 
 ## Architecture
 
-- `app/(app)/` — authed routes (home, decks, decks/[id], scan, profile, community, community/[id]) behind a shared layout. `/home` is the default landing tab.
+- `app/(app)/` — authed routes (home, decks, decks/[id], scan, profile, community, community/[id], u/[username]) behind a shared layout. `/home` is the default landing tab.
+- `app/api/decks/visibility` — owner-only publish/unpublish (awards publish XP server-side).
+- `lib/tiers.js` (config: tiers/bolt-ons/avatars/levels/achievements/tasks — client-safe) +
+  `lib/gamification.js` (server: recordEvent/addCredits, service client). Tables: `user_achievements`,
+  `user_tasks`, `credit_ledger` (RLS = own reads; writes via service role).
+- Profiles: `username` (unique, case-insensitive), `avatar_key` (preset pack via `components/Avatar.js`),
+  `xp`, credit balances, lifetime counters. Public profile at `/u/[username]` (service-client read).
 - `app/welcome` + `app/login` — entry / auth (welcome is the first-visit landing)
 - `app/api/scan` — POST image → Claude vision returns `{name, set_code, collector_number}` (JSON) →
   resolve EXACT printing via Scryfall (set/number → name+set → name fallback, with name-match
@@ -48,11 +54,20 @@ npm run lint
 - `components/` — all UI. Big ones: `Scanner.js`, `DeckDetail.js`, `DeckListPage.js`,
   `CardResultSheet.js`, `InsightsSheet.js`, `ImportDeckModal.js`
 
-## Tiers / limits
+## Tiers / limits / economy (`lib/tiers.js`, `lib/usage.js`, `lib/gamification.js`)
 
-- **Free**: 1 deck, 25 scans/month. **Pro**: unlimited.
-- Scan count is server-authoritative (`lib/usage.js`); the client also updates optimistically.
-- Failed scans do NOT consume a scan count (only successful identifications increment).
+- Tiers (GBP, monthly): **Free** 30 scans · 2 insights · 1 deck · **Pro £6.99** 1,200 · 25 · ∞ ·
+  **Legendary £14.99** 4,000 · 60 · ∞. All quotas + prices live in `lib/tiers.js`.
+- **Insights are now metered per tier** (were previously free/unlimited). Cached insights don't consume.
+- **Credit ledger**: `profiles.scan_credits` / `insight_credits`. Usage burns the monthly quota FIRST,
+  then credits (`consumeScan`/`consumeInsight`). Bolt-ons (+100 scans £1.99, +300 £2.99) and XP
+  level-ups both deposit credits. Failed scans don't consume.
+- **Gamification**: XP from scan/insight/like(given+received)/clone-received; `recordEvent()` updates
+  lifetime counters, weekly/monthly task progress, achievement unlocks, and grants level-up credits.
+  Catalogues (achievements, tasks, level curve, avatars) are in `lib/tiers.js`.
+- **Monetisation is NOT wired**: tiers + bolt-ons render with real prices but purchase goes through a
+  single stub seam `handlePurchase()` in `ProfilePage.js` (shows "coming soon"). Stripe checkout is
+  still single-price/placeholder — see punch-list.
 
 ## Scanner (`components/Scanner.js`) — the most complex component
 
@@ -104,7 +119,11 @@ STRIPE_WEBHOOK_SECRET      # placeholder
 
 ## Open punch-list (not yet done)
 
-- [ ] **Stripe**: all keys are placeholders — wire up real keys + test checkout/webhook before launch
+- [ ] **Stripe (now the main blocker for revenue)**: wire real keys + create products/prices for Pro,
+      Legendary and the two scan bolt-ons. Implement: tier checkout + one-time bolt-on checkout, and a
+      webhook that (a) sets `profiles.tier` on sub events and (b) calls `addCredits()` on bolt-on
+      payment. The single seam to fill is `handlePurchase()` in `components/ProfilePage.js`.
+- [ ] Insight bolt-on packs (only scan packs exist today); `UpgradeModal.js` still shows old £3.99 copy.
 - [ ] **Google OAuth verification**: removes the "unverified app" warning on Google sign-in
 - [ ] **CAPTCHA on anonymous sign-in**: recommended before wider launch to prevent abuse
 - [ ] Scanner: consider gating auto-fire when no card is present (Quick Scan currently fires on any
