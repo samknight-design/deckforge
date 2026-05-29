@@ -1,11 +1,13 @@
-const CACHE_NAME = 'deckforge-v2';
-const STATIC_CACHE = 'deckforge-static-v2';
-const DECK_CACHE = 'deckforge-decks-v2';
+const CACHE_NAME = 'deckforge-v3';
+const STATIC_CACHE = 'deckforge-static-v3';
+const DECK_CACHE = 'deckforge-decks-v3';
 
 const STATIC_ASSETS = [
   '/',
+  '/home',
   '/scan',
   '/decks',
+  '/community',
   '/profile',
 ];
 

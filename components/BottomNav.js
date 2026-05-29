@@ -5,6 +5,17 @@ import { usePathname } from 'next/navigation';
 
 const tabs = [
   {
+    href: '/home',
+    label: 'Home',
+    icon: (active) => (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={active ? '#f59e0b' : '#94a3b8'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 10.5 12 3l9 7.5"/>
+        <path d="M5 9.5V21h14V9.5"/>
+        <path d="M9 21v-6h6v6"/>
+      </svg>
+    ),
+  },
+  {
     href: '/decks',
     label: 'My Decks',
     icon: (active) => (

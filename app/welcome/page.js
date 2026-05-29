@@ -21,7 +21,7 @@ export default function WelcomePage() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) {
-        router.replace('/decks');
+        router.replace('/home');
       } else {
         setCheckingSession(false);
       }
@@ -35,7 +35,7 @@ export default function WelcomePage() {
       // Anonymous auth not enabled — fall back to login
       router.push('/login');
     } else {
-      router.push('/decks');
+      router.push('/home');
     }
   };
 

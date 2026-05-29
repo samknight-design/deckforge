@@ -37,7 +37,7 @@ export async function middleware(request) {
 
   // Redirect fully-authenticated (non-anonymous) users away from login/welcome
   if ((pathname === '/login' || pathname === '/welcome') && user && !user.is_anonymous) {
-    return NextResponse.redirect(new URL('/decks', request.url));
+    return NextResponse.redirect(new URL('/home', request.url));
   }
 
   return supabaseResponse;
