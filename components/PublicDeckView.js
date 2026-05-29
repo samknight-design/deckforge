@@ -2,11 +2,13 @@
 
 import { useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { groupCardsByType, exportDecklist } from '@/lib/deckUtils';
 import { BRACKET_COLORS, BRACKET_LABELS } from '@/lib/brackets';
 import { showToast } from './Toast';
 import StatsPanel from './StatsPanel';
 import LikeButton from './LikeButton';
+import Avatar from './Avatar';
 
 function ReadOnlyRow({ card }) {
   return (
@@ -30,7 +32,7 @@ function ReadOnlyRow({ card }) {
   );
 }
 
-export default function PublicDeckView({ deck, cards, liked, likeCount, isOwner, signedIn }) {
+export default function PublicDeckView({ deck, cards, liked, likeCount, isOwner, signedIn, author }) {
   const router = useRouter();
   const [tab, setTab] = useState('Cards'); // Cards | Stats
   const [cloning, setCloning] = useState(false);
@@ -96,6 +98,12 @@ export default function PublicDeckView({ deck, cards, liked, likeCount, isOwner,
             <h1 className="text-base font-bold text-text-primary truncate">{deck.name}</h1>
             {deck.commander_name && (
               <p className="text-xs truncate" style={{ color: '#94a3b8' }}>⚔ {deck.commander_name}{deck.partner_name ? ` + ${deck.partner_name}` : ''}</p>
+            )}
+            {author?.username && (
+              <Link href={`/u/${encodeURIComponent(author.username)}`} className="inline-flex items-center gap-1.5 mt-1">
+                <Avatar avatarKey={author.avatar_key} size={16} />
+                <span className="text-xs" style={{ color: '#a78bfa' }}>by {author.username}</span>
+              </Link>
             )}
           </div>
           {deck.bracket && (

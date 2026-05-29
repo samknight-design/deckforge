@@ -34,6 +34,13 @@ export default async function PublicDeckPage({ params }) {
     card_name: dc.card_name || cacheMap[dc.scryfall_id]?.card_name || '',
   }));
 
+  // Deck author (for the "by @username" link)
+  const { data: author } = await svc
+    .from('profiles')
+    .select('username, avatar_key')
+    .eq('id', deck.user_id)
+    .maybeSingle();
+
   // Current viewer: liked state + ownership
   const supabase = createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -58,6 +65,7 @@ export default async function PublicDeckPage({ params }) {
       likeCount={deck.like_count || 0}
       isOwner={isOwner}
       signedIn={!!user}
+      author={author || null}
     />
   );
 }
