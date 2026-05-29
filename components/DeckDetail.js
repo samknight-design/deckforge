@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { groupCardsByType, computeDeckHash, getDeckWarnings } from '@/lib/deckUtils';
 import { showToast } from './Toast';
@@ -73,9 +74,25 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [lastInsight, setLastInsight] = useState(null);
   const [viewMode, setViewMode] = useState('list'); // 'list' | 'grid'
+  const [isPublic, setIsPublic] = useState(!!deck.is_public);
+  const [togglingPublic, setTogglingPublic] = useState(false);
 
   const supabase = createClient();
   const router = useRouter();
+
+  const canPublish = deck.bracket != null;
+
+  const togglePublic = async () => {
+    if (!canPublish || togglingPublic) return;
+    const next = !isPublic;
+    setTogglingPublic(true);
+    const { error } = await supabase.from('decks').update({ is_public: next }).eq('id', deck.id);
+    setTogglingPublic(false);
+    if (error) { showToast('Failed to update visibility', 'error'); return; }
+    setIsPublic(next);
+    setDeck((d) => ({ ...d, is_public: next }));
+    showToast(next ? '✓ Deck is now public' : 'Deck set to private', 'success');
+  };
 
   const target = deck.format === 'commander' ? 100 : 60;
   const cardCount = cards.reduce((s, c) => s + (c.quantity || 1), 0);
@@ -264,6 +281,43 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
           </span>
           <div className="flex-1">
             <ProgressBar value={cardCount} max={target} />
+          </div>
+        </div>
+
+        {/* Public visibility */}
+        <div className="px-4 pb-2">
+          <div
+            className="flex items-center gap-3 rounded-xl px-3 py-2"
+            style={{ background: '#0d1424', border: `1px solid ${isPublic ? 'rgba(16,185,129,0.4)' : '#1e2d47'}` }}
+          >
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium" style={{ color: isPublic ? '#10b981' : '#f1f5f9' }}>
+                {isPublic ? '🌐 Public' : '🔒 Private'}
+              </div>
+              <div className="text-xs" style={{ color: '#64748b' }}>
+                {canPublish
+                  ? (isPublic ? 'Listed in Community — others can view, like & clone' : 'Only you can see this deck')
+                  : 'Run AI Insights to set a bracket before publishing'}
+              </div>
+            </div>
+            {isPublic && (
+              <Link
+                href={`/community/${deck.id}`}
+                className="flex-shrink-0 text-xs font-semibold rounded-lg px-2.5 py-1.5"
+                style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8' }}
+              >
+                View
+              </Link>
+            )}
+            <button
+              onClick={togglePublic}
+              disabled={!canPublish || togglingPublic}
+              title={canPublish ? 'Toggle public visibility' : 'Run AI Insights first'}
+              className="relative rounded-full transition-colors flex-shrink-0 disabled:opacity-40"
+              style={{ width: 44, height: 24, background: isPublic ? '#10b981' : '#334155' }}
+            >
+              <span className="absolute rounded-full bg-white transition-all" style={{ width: 20, height: 20, top: 2, left: isPublic ? 22 : 2 }} />
+            </button>
           </div>
         </div>
 
