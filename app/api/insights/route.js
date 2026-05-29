@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient, createServiceClient } from '@/lib/supabase/server';
 import { checkInsightLimit, incrementInsightCount } from '@/lib/usage';
 import { computeDeckHash } from '@/lib/deckUtils';
+import { normaliseBracket } from '@/lib/brackets';
 import Anthropic from '@anthropic-ai/sdk';
 
 export async function POST(request) {
@@ -89,6 +90,7 @@ export async function POST(request) {
         if (cachedInsight) {
           return NextResponse.json({
             content: cachedInsight.content,
+            data: cachedInsight.data || null,
             bracket_estimate: cachedInsight.bracket_estimate,
             generated_at: cachedInsight.generated_at,
             cached: true,
@@ -114,49 +116,58 @@ export async function POST(request) {
       })
       .join('\n');
 
-    const systemPrompt = `You are an expert Magic: The Gathering deck analyst. Analyse the provided deck and give structured, actionable feedback. Be specific about card names. Format your response exactly as instructed.`;
+    const systemPrompt = `You are an expert Magic: The Gathering deck analyst. Analyse the provided deck and return ONLY a JSON object with structured, actionable feedback. Be specific and use exact, real card names.`;
 
     const userPrompt = `Analyse this ${deck.format === 'commander' ? 'Commander (EDH)' : '60-card'} deck${deck.commander_name ? ` led by ${deck.commander_name}${deck.partner_name ? ` and ${deck.partner_name}` : ''}` : ''}${colorIdentity.length > 0 ? ` (Color Identity: ${colorIdentity.join('')})` : ''}:
 
 DECK LIST:
 ${cardListText}
 
-Format your response EXACTLY as follows:
+Reply with ONLY a JSON object (no markdown fences, no commentary) of this exact shape:
+{
+  "bracket": <integer 1-5>,
+  "bracket_name": "<one of: Casual, Focused Casual, Optimised, High Power, cEDH>",
+  "power_level": <integer 1-10>,
+  "summary": "<2-3 sentence overview of the deck>",
+  "strategy": "<2-3 sentences on the core gameplan and win conditions>",
+  "strengths": [{"title": "<short label>", "detail": "<explanation naming specific cards>"}],
+  "weaknesses": [{"title": "<short label>", "detail": "<explanation naming specific cards>"}],
+  "cards_to_add": [{"name": "<exact card name>", "reason": "<why it helps>"}],
+  "cards_to_remove": [{"name": "<exact card name already in this deck>", "reason": "<why to cut it>"}]
+}
 
-## Bracket [N] — [Name]
-[1-2 sentence bracket description. Bracket 1 = casual/jank, 2 = focused casual, 3 = optimised, 4 = high power, 5 = cEDH/competitive]
-
-### 💪 Key Strengths
-- **Strength name**: explanation with specific cards mentioned
-
-### ⚠️ Weaknesses & Risks
-- **Weakness**: explanation with specific cards mentioned
-
-### 🔧 Suggested Improvements
-- **Card to add**: why it helps + what to cut
-
-### 🎯 How to Play This Deck
-[2-3 sentences on the core strategy and win conditions]
-
-### ⚡ Power Level: [N]/10
-[brief justification of the power level score]`;
+Provide 3-5 items each in strengths, weaknesses, cards_to_add and cards_to_remove. Bracket scale: 1 = casual/jank, 2 = focused casual, 3 = optimised, 4 = high power, 5 = cEDH/competitive. cards_to_remove must only name cards present in the deck list above.`;
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
-      max_tokens: 1500,
+      max_tokens: 2000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
 
-    const content = message.content[0].text;
+    const raw = (message.content[0]?.text || '').trim();
 
-    // Parse bracket estimate
-    const bracketMatch = content.match(/##\s*Bracket\s*\[?(\d)\]?/i);
-    const bracketEstimate = bracketMatch ? parseInt(bracketMatch[1], 10) : 3;
+    // Parse the structured response, tolerating stray prose or code fences.
+    let data = null;
+    try {
+      const jsonText = raw.replace(/```json|```/gi, '').trim();
+      const match = jsonText.match(/\{[\s\S]*\}/);
+      data = JSON.parse(match ? match[0] : jsonText);
+    } catch {
+      data = null;
+    }
 
-    // Save insight
+    // Bracket: prefer the structured value, fall back to a loose text scan.
+    const bracketEstimate =
+      normaliseBracket(data?.bracket) ??
+      (raw.match(/bracket\D*(\d)/i) ? parseInt(raw.match(/bracket\D*(\d)/i)[1], 10) : 3);
+
+    // `content` keeps a human-readable fallback (used if `data` is ever absent).
+    const content = data?.summary || raw;
+
+    // Save insight (structured data + text fallback)
     const serviceClient = createServiceClient();
     const { data: savedInsight } = await serviceClient
       .from('insights')
@@ -164,6 +175,7 @@ Format your response EXACTLY as follows:
         deck_id: deckId,
         user_id: user.id,
         content,
+        data,
         bracket_estimate: bracketEstimate,
         deck_hash: deckHash,
         model_used: 'claude-sonnet-4-5',
@@ -172,12 +184,13 @@ Format your response EXACTLY as follows:
       .select()
       .single();
 
-    // Update deck with hash + timestamp
+    // Update deck with hash + timestamp + the stamped bracket tier
     await serviceClient
       .from('decks')
       .update({
         insight_deck_hash: deckHash,
         last_insight_at: new Date().toISOString(),
+        bracket: bracketEstimate,
       })
       .eq('id', deckId);
 
@@ -185,6 +198,7 @@ Format your response EXACTLY as follows:
 
     return NextResponse.json({
       content,
+      data,
       bracket_estimate: bracketEstimate,
       generated_at: savedInsight?.generated_at || new Date().toISOString(),
       cached: false,

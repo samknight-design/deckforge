@@ -1,6 +1,30 @@
 'use client';
 
 import Link from 'next/link';
+import { BRACKET_COLORS, BRACKET_LABELS } from '@/lib/brackets';
+
+function BracketBadge({ bracket }) {
+  if (!bracket) {
+    return (
+      <span
+        className="text-xs font-semibold rounded-full px-2.5 py-1 backdrop-blur"
+        style={{ background: 'rgba(0,0,0,0.4)', color: 'rgba(255,255,255,0.5)', border: '1px solid rgba(255,255,255,0.18)' }}
+        title="Run AI Insights to set a bracket"
+      >
+        Bracket —
+      </span>
+    );
+  }
+  const c = BRACKET_COLORS[bracket] || '#64748b';
+  return (
+    <span
+      className="text-xs font-semibold rounded-full px-2.5 py-1 backdrop-blur"
+      style={{ background: `${c}cc`, color: '#fff', border: `1px solid ${c}` }}
+    >
+      B{bracket} · {BRACKET_LABELS[bracket]}
+    </span>
+  );
+}
 
 function ProgressBar({ value, max }) {
   const pct = Math.min(100, Math.round((value / max) * 100));
@@ -67,8 +91,9 @@ export default function DeckCard({ deck }) {
 
         {/* Content */}
         <div className="relative z-10 p-4 flex flex-col h-full" style={{ minHeight: 160 }}>
-          {/* Top row: format badge */}
-          <div className="flex justify-end mb-auto">
+          {/* Top row: bracket + format badges */}
+          <div className="flex justify-between items-start mb-auto gap-2">
+            <BracketBadge bracket={deck.bracket} />
             <span
               className="text-xs font-semibold rounded-full px-2.5 py-1 backdrop-blur"
               style={{

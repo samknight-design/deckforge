@@ -107,7 +107,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
   useEffect(() => {
     supabase
       .from('insights')
-      .select('content, bracket_estimate, generated_at, deck_hash')
+      .select('content, data, bracket_estimate, generated_at, deck_hash')
       .eq('deck_id', deck.id)
       .order('generated_at', { ascending: false })
       .limit(1)
@@ -408,7 +408,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
         )}
 
         {activeTab === 'Stats' && (
-          <StatsPanel cards={cards} format={deck.format} />
+          <StatsPanel cards={cards} format={deck.format} bracket={deck.bracket} />
         )}
 
         {activeTab === 'Notes' && (

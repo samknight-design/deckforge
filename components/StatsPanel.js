@@ -2,6 +2,7 @@
 
 import { useMemo } from 'react';
 import { computeDeckStats } from '@/lib/deckUtils';
+import { BRACKET_COLORS, BRACKET_LABELS } from '@/lib/brackets';
 import ManaBar from './ManaBar';
 import ColourPip from './ColourPip';
 
@@ -16,7 +17,7 @@ const TYPE_COLORS = {
   Other: '#475569',
 };
 
-export default function StatsPanel({ cards, format }) {
+export default function StatsPanel({ cards, format, bracket }) {
   const stats = useMemo(() => computeDeckStats(cards), [cards]);
   const target = format === 'commander' ? 100 : 60;
   const recommendedLands = format === 'commander' ? [36, 40] : [20, 26];
@@ -24,8 +25,33 @@ export default function StatsPanel({ cards, format }) {
 
   const typeMax = Math.max(...Object.values(stats.typeBreakdown).filter(Boolean), 1);
 
+  const bColor = bracket ? (BRACKET_COLORS[bracket] || '#64748b') : '#475569';
+
   return (
     <div className="px-4 py-4 space-y-6">
+      {/* Power bracket */}
+      <div
+        className="rounded-xl p-3 flex items-center gap-3"
+        style={{ background: '#111827', border: `1px solid ${bracket ? `${bColor}55` : '#1e2d47'}` }}
+      >
+        <div
+          className="flex flex-col items-center justify-center rounded-lg flex-shrink-0"
+          style={{ width: 44, height: 44, background: bracket ? `${bColor}20` : '#1a2235', border: `1px solid ${bracket ? `${bColor}55` : '#1e2d47'}` }}
+        >
+          <span className="text-base font-bold leading-none" style={{ color: bracket ? bColor : '#475569' }}>
+            {bracket || '—'}
+          </span>
+        </div>
+        <div className="min-w-0">
+          <div className="text-sm font-semibold" style={{ color: bracket ? '#f1f5f9' : '#64748b' }}>
+            {bracket ? `Bracket ${bracket} · ${BRACKET_LABELS[bracket]}` : 'Bracket not set'}
+          </div>
+          <div className="text-xs" style={{ color: '#64748b' }}>
+            {bracket ? 'Predicted power level' : 'Run AI Insights to set a bracket'}
+          </div>
+        </div>
+      </div>
+
       {/* Overview grid */}
       <div className="grid grid-cols-2 gap-3">
         {[
