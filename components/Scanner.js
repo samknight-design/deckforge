@@ -7,7 +7,7 @@ import { showToast } from './Toast';
 import { showReward } from './RewardToast';
 import { formatEurTotal } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
-import { warmOcr, teardownOcr, benchmarkOcr, ocrEngineName } from '@/lib/ocr';
+import { loadMatchDb, matchCard, matchDbInfo, previewCardCrop } from '@/lib/cardMatch';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -205,20 +205,30 @@ export default function Scanner({
     return () => stopCamera();
   }, [mode, isOnline, startCamera, stopCamera]);
 
-  // Warm the OCR engine ahead of the first read so it isn't paying load cost.
+  // Preload the hash DB when entering Scan mode so the first match is instant.
   useEffect(() => {
-    if (mode === 'Scan' && cameraReady) warmOcr();
+    if (mode === 'Scan' && cameraReady) loadMatchDb('/hashes/ltr.json').catch(() => {});
   }, [mode, cameraReady]);
-  useEffect(() => () => teardownOcr(), []);
 
-  // Phase 0 benchmark: run OCR on the current frame and report on-device speed.
+  // Phase H0 benchmark: visually match the framed card against the hash DB and
+  // report the result, its distance/separation (confidence) and on-device speed.
   const runBench = useCallback(async () => {
     if (!videoRef.current?.videoWidth) return;
     setBenchRunning(true);
     setBenchResult(null);
     try {
-      const r = await benchmarkOcr(videoRef.current, 5, { vfW: 232, vfH: 324 });
-      setBenchResult(r);
+      await loadMatchDb('/hashes/ltr.json');
+      const times = [];
+      let last = null;
+      for (let i = 0; i < 5; i++) {
+        last = matchCard(videoRef.current, { vfW: 232, vfH: 324 });
+        if (last) times.push(last.ms);
+      }
+      times.sort((a, b) => a - b);
+      const preview = previewCardCrop(videoRef.current, { vfW: 232, vfH: 324 });
+      const info = matchDbInfo();
+      if (!last) setBenchResult({ error: 'No match (camera not ready?)' });
+      else setBenchResult({ ...last, median: times[Math.floor(times.length / 2)] || last.ms, preview, dbCount: info?.n });
     } catch (e) {
       setBenchResult({ error: String(e?.message || e) });
     } finally {
@@ -820,29 +830,37 @@ export default function Scanner({
                     style={{ background: 'rgba(17,24,39,0.95)', border: '1px solid #1e2d47' }}
                   >
                     {benchResult.error ? (
-                      <p className="text-xs" style={{ color: '#f87171' }}>OCR error: {benchResult.error}</p>
-                    ) : (
-                      <>
-                        <p className="text-lg font-bold" style={{ color: benchResult.median <= 500 ? '#10b981' : benchResult.median <= 900 ? '#f59e0b' : '#f87171' }}>
-                          {benchResult.median} ms / read
-                        </p>
-                        <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>
-                          {benchResult.engine} · min {benchResult.min} / max {benchResult.max} ({benchResult.runs} runs)
-                        </p>
-                        <p className="text-sm mt-1" style={{ color: '#f1f5f9' }}>
-                          read: “{benchResult.name || '(nothing)'}”
-                        </p>
-                        {benchResult.preview && (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={benchResult.preview}
-                            alt="OCR crop"
-                            className="mx-auto mt-2 rounded"
-                            style={{ maxWidth: 150, border: '1px solid #1e2d47' }}
-                          />
-                        )}
-                      </>
-                    )}
+                      <p className="text-xs" style={{ color: '#f87171' }}>Match error: {benchResult.error}</p>
+                    ) : (() => {
+                      const total = benchResult.totalBits || 256;
+                      const matchPct = Math.round((1 - benchResult.distance / total) * 100);
+                      const gapPct = Math.round(((benchResult.runnerUp - benchResult.distance) / total) * 100);
+                      const strong = benchResult.distance <= total * 0.20 && (benchResult.runnerUp - benchResult.distance) >= total * 0.05;
+                      const ok = benchResult.distance <= total * 0.28;
+                      const color = strong ? '#10b981' : ok ? '#f59e0b' : '#f87171';
+                      return (
+                        <>
+                          <p className="text-base font-bold" style={{ color }}>
+                            {benchResult.name || '(no match)'}
+                          </p>
+                          <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>
+                            {benchResult.set?.toUpperCase()} #{benchResult.cn} · match {matchPct}% · gap {gapPct}%
+                          </p>
+                          <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
+                            dist {benchResult.distance}/{total} · {benchResult.median}ms · DB {benchResult.dbCount}
+                          </p>
+                          {benchResult.preview && (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={benchResult.preview}
+                              alt="card crop"
+                              className="mx-auto mt-2 rounded"
+                              style={{ maxWidth: 130, border: '1px solid #1e2d47' }}
+                            />
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
                 <button
@@ -851,7 +869,7 @@ export default function Scanner({
                   className="rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
                   style={{ background: 'rgba(124,58,237,0.9)', color: '#fff', border: '1px solid #a78bfa' }}
                 >
-                  {benchRunning ? 'Testing OCR…' : `🔬 Test OCR speed (${ocrEngineName()})`}
+                  {benchRunning ? 'Matching…' : '🎯 Match test (LotR DB)'}
                 </button>
               </div>
 
