@@ -1,9 +1,18 @@
-import { createServiceClient } from '@/lib/supabase/server';
+import { createClient, createServiceClient } from '@/lib/supabase/server';
 import HomePage from '@/components/HomePage';
 
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
+  const supabase = createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  const isAnon = user?.is_anonymous === true;
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('username, avatar_key, xp, tier')
+    .eq('id', user.id)
+    .maybeSingle();
+
   const svc = createServiceClient();
 
   // Rank public decks by likes in the last 7 days, tie-broken by all-time likes.
@@ -34,5 +43,12 @@ export default async function Home() {
   // Backfill with top all-time public decks
   (publicDecks || []).forEach((d) => { if (!seen.has(d.id)) { topDecks.push(d); seen.add(d.id); } });
 
-  return <HomePage topDecks={topDecks.slice(0, 8)} news={news || []} />;
+  return (
+    <HomePage
+      topDecks={topDecks.slice(0, 8)}
+      news={news || []}
+      profile={profile || { xp: 0, tier: 'free' }}
+      isAnon={isAnon}
+    />
+  );
 }
