@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
+import { formatEurTotal } from '@/lib/currency';
+import { getCurrency } from '@/lib/prefs';
 import DeckCard from './DeckCard';
 import UpgradeModal from './UpgradeModal';
 import ImportDeckModal from './ImportDeckModal';
@@ -30,7 +32,7 @@ function DeckListRow({ deck }) {
         </div>
       </div>
       {deck.estimated_value_eur != null && (
-        <span className="text-xs font-semibold flex-shrink-0" style={{ color: '#10b981' }}>€{parseFloat(deck.estimated_value_eur).toFixed(0)}</span>
+        <span className="text-xs font-semibold flex-shrink-0" style={{ color: '#10b981' }}>{formatEurTotal(deck.estimated_value_eur, typeof window !== 'undefined' ? getCurrency() : 'GBP')}</span>
       )}
     </Link>
   );

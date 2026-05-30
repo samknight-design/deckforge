@@ -3,6 +3,8 @@
 import { useMemo } from 'react';
 import { computeDeckStats } from '@/lib/deckUtils';
 import { BRACKET_COLORS, BRACKET_LABELS } from '@/lib/brackets';
+import { formatEurTotal } from '@/lib/currency';
+import { getCurrency } from '@/lib/prefs';
 import ManaBar from './ManaBar';
 import ColourPip from './ColourPip';
 
@@ -58,7 +60,7 @@ export default function StatsPanel({ cards, format, bracket }) {
           { label: 'Total Cards', value: `${stats.totalCards}/${target}` },
           { label: 'Lands', value: stats.landCount, warning: landWarning },
           { label: 'Avg CMC', value: stats.avgCmc },
-          { label: 'Est. Value', value: `€${stats.totalValue}`, color: '#10b981' },
+          { label: 'Est. Value', value: formatEurTotal(stats.totalValue, getCurrency()), color: '#10b981' },
         ].map((item) => (
           <div
             key={item.label}

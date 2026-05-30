@@ -6,6 +6,8 @@ import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { groupCardsByType, computeDeckHash, getDeckWarnings } from '@/lib/deckUtils';
 import { showToast } from './Toast';
+import { formatEurTotal } from '@/lib/currency';
+import { getCurrency } from '@/lib/prefs';
 import CardRow from './CardRow';
 import StatsPanel from './StatsPanel';
 import CommanderPanel from './CommanderPanel';
@@ -291,7 +293,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
             <span className="font-bold text-text-primary">{cardCount}</span>/{target}
           </span>
           <span className="text-sm font-bold" style={{ color: '#10b981' }}>
-            €{totalValue.toFixed(2)}
+            {formatEurTotal(totalValue, getCurrency())}
           </span>
           <div className="flex-1">
             <ProgressBar value={cardCount} max={target} />

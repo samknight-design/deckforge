@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { showToast } from './Toast';
 import { showReward } from './RewardToast';
+import { formatEurTotal } from '@/lib/currency';
+import { getCurrency } from '@/lib/prefs';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -1025,7 +1027,7 @@ export default function Scanner({
                 </div>
                 {card.price_eur != null && (
                   <span className="text-xs font-semibold flex-shrink-0" style={{ color: '#10b981' }}>
-                    €{parseFloat(card.price_eur).toFixed(2)}
+                    {formatEurTotal(card.price_eur, typeof window !== 'undefined' ? getCurrency() : 'GBP')}
                   </span>
                 )}
                 {/* Add affordance — makes it clear tapping adds the card to a deck */}

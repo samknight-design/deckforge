@@ -1,4 +1,5 @@
 import './globals.css';
+import { cookies } from 'next/headers';
 
 export const metadata = {
   title: 'DeckForge',
@@ -20,8 +21,13 @@ export const viewport = {
 };
 
 export default function RootLayout({ children }) {
+  // Read prefs from cookies on the server so the initial HTML matches the
+  // user's saved choice — avoids a flash of dark when switching to light.
+  const ck = cookies();
+  const theme = ck.get('df_theme')?.value || 'dark';
+  const currency = ck.get('df_currency')?.value || 'GBP';
   return (
-    <html lang="en">
+    <html lang="en" data-theme={theme} data-currency={currency}>
       <head>
         <link rel="apple-touch-icon" href="/icons/icon.svg" />
         <meta name="apple-mobile-web-app-capable" content="yes" />

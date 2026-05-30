@@ -1,7 +1,11 @@
 'use client';
 
+'use client';
+
 import Link from 'next/link';
 import { BRACKET_COLORS, BRACKET_LABELS } from '@/lib/brackets';
+import { formatEurTotal } from '@/lib/currency';
+import { getCurrency } from '@/lib/prefs';
 
 function BracketBadge({ bracket, compact }) {
   if (!bracket) {
@@ -58,7 +62,7 @@ export default function DeckCard({ deck, compact }) {
   const count = deck.card_count || 0;
   const hasArt = !!deck.commander_image_url;
   const valueDisplay = deck.estimated_value_eur != null
-    ? `€${parseFloat(deck.estimated_value_eur).toFixed(2)}`
+    ? formatEurTotal(deck.estimated_value_eur, typeof window !== 'undefined' ? getCurrency() : 'GBP')
     : null;
 
   return (

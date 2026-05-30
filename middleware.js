@@ -28,7 +28,7 @@ export async function middleware(request) {
   const pathname = request.nextUrl.pathname;
 
   // Protected routes require any session (including anonymous)
-  const protectedPaths = ['/scan', '/decks', '/profile', '/home', '/community', '/u', '/rewards', '/rules', '/brackets', '/banlist'];
+  const protectedPaths = ['/scan', '/decks', '/profile', '/home', '/community', '/u', '/rewards', '/rules', '/brackets', '/banlist', '/privacy', '/about'];
   const isProtected = protectedPaths.some((p) => pathname.startsWith(p));
 
   if (isProtected && !user) {

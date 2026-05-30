@@ -1,12 +1,16 @@
 'use client';
 
 import { ManaCostDisplay, ColourPips } from './ColourPip';
+import { formatEurTotal, symbolFor } from '@/lib/currency';
+import { getCurrency } from '@/lib/prefs';
 
 export default function CardModal({ card, format, hasCommander, onClose, onMakeCommander, onMakePartner, onToggleFoil }) {
-  const formatPrice = (v) => (v != null ? `€${parseFloat(v).toFixed(2)}` : '—');
+  const currency = typeof window !== 'undefined' ? getCurrency() : 'GBP';
+  const formatPrice = (v) => formatEurTotal(v, currency);
   const formatUsd = (v) => (v != null ? `$${parseFloat(v).toFixed(2)}` : '—');
   const isCommander = format === 'commander';
   const isFoil = !!card.is_foil;
+  const primaryLabel = currency === 'USD' ? 'TCGPlayer' : 'Cardmarket';
 
   return (
     <>
@@ -90,19 +94,21 @@ export default function CardModal({ card, format, hasCommander, onClose, onMakeC
           {/* Prices */}
           <div className="flex gap-4 mb-4">
             <div>
-              <div className="text-xs text-text-dim mb-0.5">Cardmarket</div>
+              <div className="text-xs text-text-dim mb-0.5">{primaryLabel}</div>
               <div className="font-bold text-green-400 text-base">{formatPrice(card.price_eur)}</div>
             </div>
             {card.price_eur_foil != null && (
               <div>
-                <div className="text-xs text-text-dim mb-0.5">Foil EUR</div>
+                <div className="text-xs text-text-dim mb-0.5">Foil ({symbolFor(currency)})</div>
                 <div className="font-semibold text-text-secondary text-sm">{formatPrice(card.price_eur_foil)}</div>
               </div>
             )}
-            <div>
-              <div className="text-xs text-text-dim mb-0.5">TCGPlayer</div>
-              <div className="font-semibold text-text-secondary text-sm">{formatUsd(card.price_usd)}</div>
-            </div>
+            {currency !== 'USD' && (
+              <div>
+                <div className="text-xs text-text-dim mb-0.5">TCGPlayer</div>
+                <div className="font-semibold text-text-secondary text-sm">{formatUsd(card.price_usd)}</div>
+              </div>
+            )}
           </div>
 
           {/* Foil toggle (deck context only) */}

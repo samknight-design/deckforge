@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import Image from 'next/image';
 import { ManaCostDisplay, ColourPips } from './ColourPip';
+import { formatEurTotal } from '@/lib/currency';
+import { getCurrency } from '@/lib/prefs';
 
 const NEW_DECK = '__new__';
 
@@ -19,7 +21,8 @@ export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDi
     setAdding(false);
   };
 
-  const formatPrice = (v) => (v != null ? `€${parseFloat(v).toFixed(2)}` : '—');
+  const currency = typeof window !== 'undefined' ? getCurrency() : 'GBP';
+  const formatPrice = (v) => formatEurTotal(v, currency);
 
   // Foil-aware pricing (falls back to non-foil if the printing has no foil price)
   const eurPrice = isFoil ? (card.price_eur_foil ?? card.price_eur) : card.price_eur;

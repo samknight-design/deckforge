@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { showToast } from './Toast';
 import Avatar from './Avatar';
+import SettingsSection from './SettingsSection';
 import {
   TIERS, TIER_ORDER, BOLT_ONS, AVATARS, CURRENCY,
   scanQuota, insightQuota, deckLimit, levelProgress,
@@ -332,14 +333,16 @@ export default function ProfilePage({ profile, usage, deckCount, publicDecks, to
           </button>
         )}
 
+        {/* Settings & About — tucked-away section */}
+        <SettingsSection userId={profile?.id} savedCurrency={profile?.currency} savedTheme={profile?.theme} />
+
         {/* Sign out */}
         <button onClick={handleSignOut} className="w-full rounded-xl py-3 text-sm font-medium flex items-center justify-between px-4" style={{ background: '#111827', border: '1px solid #1e2d47', color: '#ef4444', minHeight: 44 }}>
           Sign Out <span>→</span>
         </button>
 
         <div className="text-center py-2">
-          <p className="text-xs" style={{ color: '#475569' }}>DeckForge v{APP_VERSION}</p>
-          <p className="text-xs mt-0.5" style={{ color: '#475569' }}>Powered by Scryfall & Claude</p>
+          <p className="text-xs" style={{ color: '#475569' }}>In partnership with Scryfall &amp; Anthropic Claude</p>
         </div>
       </div>
     </div>

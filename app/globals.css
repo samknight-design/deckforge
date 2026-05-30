@@ -116,6 +116,21 @@ main {
   animation: reward-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* ── Light mode (preview) ──────────────────────────────────────────────
+   Most surfaces use hardcoded dark colours via inline styles, so light
+   mode is an incremental rollout. Below we override the few CSS-variable
+   backed surfaces; deeper polish is on the punch-list. */
+html[data-theme="light"] {
+  --bg-primary: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-elevated: #f1f5f9;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-dim: #94a3b8;
+  --border: #e2e8f0;
+}
+html[data-theme="light"] body { background-color: var(--bg-primary); color: var(--text-primary); }
+
 /* No user select on interactive elements */
 button, a {
   user-select: none;
