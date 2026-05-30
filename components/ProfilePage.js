@@ -341,9 +341,6 @@ export default function ProfilePage({ profile, usage, deckCount, publicDecks, to
           Sign Out <span>→</span>
         </button>
 
-        <div className="text-center py-2">
-          <p className="text-xs" style={{ color: '#475569' }}>In partnership with Scryfall &amp; Anthropic Claude</p>
-        </div>
       </div>
     </div>
   );

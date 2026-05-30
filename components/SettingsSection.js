@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { showToast } from './Toast';
 import { CURRENCY_OPTIONS, DEFAULT_CURRENCY } from '@/lib/currency';
@@ -15,6 +16,7 @@ export default function SettingsSection({ userId, savedCurrency, savedTheme }) {
   const [theme, setThemeState] = useState(savedTheme || 'dark');
   const [currency, setCurrencyState] = useState(savedCurrency || DEFAULT_CURRENCY);
   const supabase = createClient();
+  const router = useRouter();
 
   // Re-sync from the cookie on mount in case the server's value was stale.
   useEffect(() => {
@@ -36,8 +38,9 @@ export default function SettingsSection({ userId, savedCurrency, savedTheme }) {
     setCurrency(next);
     if (userId) await supabase.from('profiles').update({ currency: next }).eq('id', userId);
     showToast(`Currency set to ${next}`, 'success');
-    // Reflect everywhere by re-rendering server components that read the cookie.
-    if (typeof window !== 'undefined') setTimeout(() => window.location.reload(), 600);
+    // router.refresh() re-renders the server tree in place — preserves scroll
+    // position (a full window.location.reload() would jump to the top).
+    router.refresh();
   };
 
   const rateUrl = process.env.NEXT_PUBLIC_RATE_URL || '';
@@ -143,7 +146,7 @@ export default function SettingsSection({ userId, savedCurrency, savedTheme }) {
             </a>
           </div>
 
-          <p className="text-xs text-center pt-1" style={{ color: '#475569' }}>DeckForge v{APP_VERSION} · In partnership with Scryfall &amp; Anthropic Claude</p>
+          <p className="text-xs text-center pt-1" style={{ color: '#475569' }}>DeckForge v{APP_VERSION}</p>
         </div>
       )}
     </div>

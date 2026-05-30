@@ -15,7 +15,7 @@ export default function PrivacyPage() {
             <li>Your decks, cards and notes.</li>
             <li>Usage counts (scans / insights this month) so we can enforce plan limits.</li>
             <li>Likes you give, and likes received on your public decks.</li>
-            <li>Card photos you upload — sent to our AI provider for identification, then discarded (we don’t keep your scan images).</li>
+            <li>Card photos you upload — sent to our AI service for identification, then discarded (we don’t keep your scan images).</li>
           </ul>
         </Section>
 
@@ -27,8 +27,15 @@ export default function PrivacyPage() {
           </ul>
         </Section>
 
-        <Section title="Third parties">
-          <p>We work with: <strong className="text-white">Supabase</strong> (auth + database), <strong className="text-white">Anthropic Claude</strong> (vision for scanning, deck insights), <strong className="text-white">Scryfall</strong> (card data partner), <strong className="text-white">Stripe</strong> (payments), <strong className="text-white">Vercel</strong> (hosting). Each handles only the data it needs.</p>
+        <Section title="Service providers we use">
+          <p>To operate the app we use the following third-party services as data processors. They are <strong>not</strong> partners, affiliates or sponsors of DeckForge — they process data on our behalf to deliver specific features:</p>
+          <ul className="list-disc list-inside space-y-1 mt-2">
+            <li>Authentication and database hosting.</li>
+            <li>An AI service for card identification and deck analysis.</li>
+            <li>A payment processor for subscriptions (when you choose to subscribe).</li>
+            <li>A web host for the app itself.</li>
+          </ul>
+          <p className="mt-2">Each only handles the data needed for its role. You can request the specific provider list at any time by emailing the address below.</p>
         </Section>
 
         <Section title="Your controls">

@@ -25,20 +25,8 @@ export default async function AboutPage() {
           <div className="font-bold text-white text-lg">DeckForge</div>
           <div className="text-xs" style={{ color: '#64748b' }}>Version {APP_VERSION}</div>
           <p className="text-sm mt-3" style={{ color: '#cbd5e1' }}>
-            The MTG companion built for players — scan, build, analyse and share decks, with AI insights and a friendly community.
+            An MTG companion app built for players — scan cards, build and analyse decks, and share them with a community.
           </p>
-        </div>
-
-        <div className="rounded-2xl p-4" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
-          <h3 className="font-bold text-white mb-2">Partners</h3>
-          <ul className="text-sm space-y-1.5" style={{ color: '#cbd5e1' }}>
-            <li>🃏 <strong className="text-white">Scryfall</strong> — card data partner (prices, images, sets).</li>
-            <li>✨ <strong className="text-white">Anthropic Claude</strong> — vision scanning and deck insights.</li>
-            <li>🗄️ <strong className="text-white">Supabase</strong> — auth, database and storage.</li>
-            <li>▲ <strong className="text-white">Vercel</strong> — hosting.</li>
-            <li>💳 <strong className="text-white">Stripe</strong> — secure payments.</li>
-          </ul>
-          <p className="text-xs mt-3" style={{ color: '#475569' }}>Magic: The Gathering is a trademark of Wizards of the Coast. DeckForge is an independent fan project and is not affiliated with WotC.</p>
         </div>
 
         <div>
@@ -58,6 +46,17 @@ export default async function AboutPage() {
               </div>
             ))}
           </div>
+        </div>
+
+        {/* Legally-required attributions only. DeckForge is an independent app —
+            mentions below are NOT partnerships, sponsorships or endorsements. */}
+        <div className="rounded-xl p-3" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
+          <div className="text-xs font-semibold mb-1" style={{ color: '#64748b' }}>ATTRIBUTIONS</div>
+          <p className="text-xs leading-relaxed" style={{ color: '#94a3b8' }}>
+            Card data and prices courtesy of <a href="https://scryfall.com" target="_blank" rel="noopener noreferrer" style={{ color: '#cbd5e1' }}>Scryfall</a>.
+            Magic: The Gathering and all card images are trademarks and copyrights of Wizards of the Coast LLC.
+            DeckForge is an independent project and is <strong>not</strong> affiliated with, endorsed by or sponsored by Wizards of the Coast, Scryfall, or any other company.
+          </p>
         </div>
 
       </div>
