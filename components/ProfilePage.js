@@ -283,6 +283,7 @@ export default function ProfilePage({ profile, usage, deckCount, publicDecks, to
                     <div className="text-right">
                       <div className="font-bold text-lg" style={{ color: t.color }}>{t.price === 0 ? 'Free' : fmtPrice(t.price)}</div>
                       {t.price > 0 && <div className="text-xs" style={{ color: '#475569' }}>/ month</div>}
+                      {t.priceYear > 0 && <div className="text-xs" style={{ color: '#64748b' }}>or {fmtPrice(t.priceYear)}/yr</div>}
                     </div>
                   </div>
                   <div className="flex gap-3 text-xs mb-3" style={{ color: '#cbd5e1' }}>
