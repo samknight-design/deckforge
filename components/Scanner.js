@@ -7,6 +7,7 @@ import { showToast } from './Toast';
 import { showReward } from './RewardToast';
 import { formatEurTotal } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
+import { warmOcr, teardownOcr, benchmarkOcr, ocrEngineName } from '@/lib/ocr';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -80,6 +81,10 @@ export default function Scanner({
   const [cameraError, setCameraError]   = useState('');
   const [isOnline, setIsOnline]         = useState(true);
   const [scanState, setScanState]       = useState('idle'); // idle | stable | scanning | cooldown
+
+  // ── Phase 0 OCR benchmark (TEMPORARY — remove before Phase 1 ships) ──
+  const [benchResult, setBenchResult] = useState(null);
+  const [benchRunning, setBenchRunning] = useState(false);
 
   // ── Quick Scan (Pro only) ────────────────────────────
   const [quickScan, setQuickScan]           = useState(false); // auto-scan + auto-add, no confirm prompt
@@ -199,6 +204,27 @@ export default function Scanner({
     else stopCamera();
     return () => stopCamera();
   }, [mode, isOnline, startCamera, stopCamera]);
+
+  // Warm the OCR engine ahead of the first read so it isn't paying load cost.
+  useEffect(() => {
+    if (mode === 'Scan' && cameraReady) warmOcr();
+  }, [mode, cameraReady]);
+  useEffect(() => () => teardownOcr(), []);
+
+  // Phase 0 benchmark: run OCR on the current frame and report on-device speed.
+  const runBench = useCallback(async () => {
+    if (!videoRef.current?.videoWidth) return;
+    setBenchRunning(true);
+    setBenchResult(null);
+    try {
+      const r = await benchmarkOcr(videoRef.current, 5);
+      setBenchResult(r);
+    } catch (e) {
+      setBenchResult({ error: String(e?.message || e) });
+    } finally {
+      setBenchRunning(false);
+    }
+  }, []);
 
   // ── Scan-state helper (only re-renders when value changes) ──
   const updateScanState = useCallback((s) => {
@@ -784,6 +810,40 @@ export default function Scanner({
                 }}>
                   {vfText}
                 </p>
+              </div>
+
+              {/* ── Phase 0 OCR benchmark (TEMPORARY) ── */}
+              <div className="absolute left-0 right-0 flex flex-col items-center gap-2 px-6" style={{ bottom: 112 }}>
+                {benchResult && (
+                  <div
+                    className="rounded-xl px-4 py-3 text-center max-w-xs w-full"
+                    style={{ background: 'rgba(17,24,39,0.95)', border: '1px solid #1e2d47' }}
+                  >
+                    {benchResult.error ? (
+                      <p className="text-xs" style={{ color: '#f87171' }}>OCR error: {benchResult.error}</p>
+                    ) : (
+                      <>
+                        <p className="text-lg font-bold" style={{ color: benchResult.median <= 500 ? '#10b981' : benchResult.median <= 900 ? '#f59e0b' : '#f87171' }}>
+                          {benchResult.median} ms / read
+                        </p>
+                        <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>
+                          {benchResult.engine} · min {benchResult.min} / max {benchResult.max} ({benchResult.runs} runs)
+                        </p>
+                        <p className="text-sm mt-1" style={{ color: '#f1f5f9' }}>
+                          read: “{benchResult.name || '(nothing)'}”
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+                <button
+                  onPointerDown={runBench}
+                  disabled={benchRunning || !cameraReady}
+                  className="rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                  style={{ background: 'rgba(124,58,237,0.9)', color: '#fff', border: '1px solid #a78bfa' }}
+                >
+                  {benchRunning ? 'Testing OCR…' : `🔬 Test OCR speed (${ocrEngineName()})`}
+                </button>
               </div>
 
               {/* Bottom controls */}
