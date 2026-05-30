@@ -3,25 +3,25 @@
 import Link from 'next/link';
 import { BRACKET_COLORS, BRACKET_LABELS } from '@/lib/brackets';
 
-function BracketBadge({ bracket }) {
+function BracketBadge({ bracket, compact }) {
   if (!bracket) {
     return (
       <span
-        className="text-xs font-semibold rounded-full px-2.5 py-1 backdrop-blur"
-        style={{ background: 'rgba(0,0,0,0.4)', color: 'rgba(255,255,255,0.5)', border: '1px solid rgba(255,255,255,0.18)' }}
+        className="text-xs font-semibold rounded-full backdrop-blur"
+        style={{ background: 'rgba(0,0,0,0.4)', color: 'rgba(255,255,255,0.55)', border: '1px solid rgba(255,255,255,0.18)', padding: compact ? '2px 7px' : '4px 10px' }}
         title="Run AI Insights to set a bracket"
       >
-        Bracket —
+        {compact ? 'B–' : 'Bracket —'}
       </span>
     );
   }
   const c = BRACKET_COLORS[bracket] || '#64748b';
   return (
     <span
-      className="text-xs font-semibold rounded-full px-2.5 py-1 backdrop-blur"
-      style={{ background: `${c}cc`, color: '#fff', border: `1px solid ${c}` }}
+      className="text-xs font-semibold rounded-full backdrop-blur whitespace-nowrap"
+      style={{ background: `${c}cc`, color: '#fff', border: `1px solid ${c}`, padding: compact ? '2px 7px' : '4px 10px' }}
     >
-      B{bracket} · {BRACKET_LABELS[bracket]}
+      {compact ? `B${bracket}` : `B${bracket} · ${BRACKET_LABELS[bracket]}`}
     </span>
   );
 }
@@ -53,7 +53,7 @@ function ColorDots({ colors }) {
   );
 }
 
-export default function DeckCard({ deck }) {
+export default function DeckCard({ deck, compact }) {
   const target = deck.format === 'commander' ? 100 : 60;
   const count = deck.card_count || 0;
   const hasArt = !!deck.commander_image_url;
@@ -93,16 +93,17 @@ export default function DeckCard({ deck }) {
         <div className="relative z-10 p-4 flex flex-col h-full" style={{ minHeight: 160 }}>
           {/* Top row: bracket + format badges */}
           <div className="flex justify-between items-start mb-auto gap-2">
-            <BracketBadge bracket={deck.bracket} />
+            <BracketBadge bracket={deck.bracket} compact={compact} />
             <span
-              className="text-xs font-semibold rounded-full px-2.5 py-1 backdrop-blur"
+              className="text-xs font-semibold rounded-full backdrop-blur whitespace-nowrap"
               style={{
                 background: deck.format === 'commander' ? 'rgba(124,58,237,0.55)' : 'rgba(245,158,11,0.55)',
                 color: '#fff',
                 border: `1px solid ${deck.format === 'commander' ? 'rgba(167,139,250,0.5)' : 'rgba(245,158,11,0.5)'}`,
+                padding: compact ? '2px 7px' : '4px 10px',
               }}
             >
-              {deck.format === 'commander' ? 'Commander' : '60-Card'}
+              {compact ? (deck.format === 'commander' ? 'CMD' : '60') : (deck.format === 'commander' ? 'Commander' : '60-Card')}
             </span>
           </div>
 

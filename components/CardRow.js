@@ -37,43 +37,38 @@ export default function CardRow({ card, format, hasCommander, onQuantityChange, 
           )}
         </button>
 
-        {/* Card info */}
+        {/* Card info — mana cost lives on the second line (with room to grow) so
+            it can never overflow into the quantity buttons. */}
         <div className="flex-1 min-w-0" onClick={() => setShowModal(true)}>
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-sm font-medium text-text-primary truncate">
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm font-medium text-text-primary truncate min-w-0">
               {card.card_name}
             </span>
             {(isCommander || isPartner) && (
               <span
-                className="text-xs font-bold rounded px-1.5 py-0.5"
+                className="text-xs font-bold rounded px-1.5 py-0.5 flex-shrink-0"
                 style={{ background: 'rgba(124,58,237,0.3)', color: '#a78bfa' }}
               >
                 {isPartner ? 'Partner' : 'CMD'}
               </span>
             )}
             {card.is_foil && (
-              <span
-                className="text-xs font-bold rounded px-1.5 py-0.5"
-                style={{ background: 'rgba(124,58,237,0.22)', color: '#c4b5fd' }}
-                title="Foil"
-              >
-                ✦ Foil
-              </span>
+              <span className="text-xs font-bold flex-shrink-0" style={{ color: '#c4b5fd' }} title="Foil">✦</span>
             )}
             {showSingletonWarning && (
-              <span className="text-xs" title="Singleton violation">⚠️</span>
+              <span className="text-xs flex-shrink-0" title="Singleton violation">⚠️</span>
             )}
           </div>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-xs text-text-dim truncate" style={{ maxWidth: 160 }}>
+          <div className="flex items-center gap-2 mt-0.5 min-w-0">
+            <span className="text-xs text-text-dim truncate min-w-0">
               {card.type_line?.split(' — ')[0]}
             </span>
+            {card.mana_cost && (
+              <div className="flex-shrink-0">
+                <ManaCostDisplay manaCost={card.mana_cost} size={13} />
+              </div>
+            )}
           </div>
-        </div>
-
-        {/* CMC */}
-        <div className="flex-shrink-0 w-7 text-center">
-          <ManaCostDisplay manaCost={card.mana_cost} size={14} />
         </div>
 
         {/* Qty controls */}

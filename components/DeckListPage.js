@@ -162,7 +162,7 @@ export default function DeckListPage({ decks: initialDecks, tier, userId }) {
               </div>
             ) : viewMode === 'grid' ? (
               <div className="grid grid-cols-2 gap-3">
-                {decks.map((deck) => <DeckCard key={deck.id} deck={deck} />)}
+                {decks.map((deck) => <DeckCard key={deck.id} deck={deck} compact />)}
               </div>
             ) : (
               <div className="space-y-3">
