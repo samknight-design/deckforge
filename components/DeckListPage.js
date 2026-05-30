@@ -2,10 +2,39 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import DeckCard from './DeckCard';
 import UpgradeModal from './UpgradeModal';
 import ImportDeckModal from './ImportDeckModal';
+
+const VIEW_MODES = [
+  { key: 'large', icon: '▭' },
+  { key: 'grid', icon: '⊞' },
+  { key: 'list', icon: '≡' },
+];
+
+function DeckListRow({ deck }) {
+  const target = deck.format === 'commander' ? 100 : 60;
+  return (
+    <Link href={`/decks/${deck.id}`} className="flex items-center gap-3 rounded-xl p-2.5" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
+      {deck.commander_image_url ? (
+        <img src={deck.commander_image_url} alt="" className="rounded-lg flex-shrink-0" style={{ width: 40, height: 40, objectFit: 'cover', objectPosition: 'center 18%' }} />
+      ) : (
+        <div className="rounded-lg flex-shrink-0 flex items-center justify-center" style={{ width: 40, height: 40, background: '#1a2235' }}>🃏</div>
+      )}
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium text-white truncate">{deck.name}</div>
+        <div className="text-xs" style={{ color: '#64748b' }}>
+          {deck.format === 'commander' ? 'Commander' : '60-Card'} · {deck.card_count || 0}/{target}{deck.bracket ? ` · B${deck.bracket}` : ''}
+        </div>
+      </div>
+      {deck.estimated_value_eur != null && (
+        <span className="text-xs font-semibold flex-shrink-0" style={{ color: '#10b981' }}>€{parseFloat(deck.estimated_value_eur).toFixed(0)}</span>
+      )}
+    </Link>
+  );
+}
 
 const QUICK_ACTIONS = [
   { icon: '📷', label: 'Scan', mode: 'Live Scan' },
@@ -22,6 +51,7 @@ export default function DeckListPage({ decks: initialDecks, tier, userId }) {
   const [newDeckName, setNewDeckName] = useState('');
   const [newDeckFormat, setNewDeckFormat] = useState('commander');
   const [creating, setCreating] = useState(false);
+  const [viewMode, setViewMode] = useState('large'); // 'large' | 'grid' | 'list'
   const router = useRouter();
   const supabase = createClient();
 
@@ -108,7 +138,38 @@ export default function DeckListPage({ decks: initialDecks, tier, userId }) {
             </button>
           </div>
         ) : (
-          decks.map((deck) => <DeckCard key={deck.id} deck={deck} />)
+          <>
+            {/* View toggle */}
+            <div className="flex items-center justify-end">
+              <div className="flex gap-0.5 rounded-lg p-0.5" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
+                {VIEW_MODES.map((m) => (
+                  <button
+                    key={m.key}
+                    onClick={() => setViewMode(m.key)}
+                    className="rounded-md px-2.5 py-1 text-sm"
+                    style={{ background: viewMode === m.key ? '#1a2235' : 'transparent', color: viewMode === m.key ? '#f59e0b' : '#64748b' }}
+                    title={m.key}
+                  >
+                    {m.icon}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {viewMode === 'list' ? (
+              <div className="space-y-1.5">
+                {decks.map((deck) => <DeckListRow key={deck.id} deck={deck} />)}
+              </div>
+            ) : viewMode === 'grid' ? (
+              <div className="grid grid-cols-2 gap-3">
+                {decks.map((deck) => <DeckCard key={deck.id} deck={deck} />)}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {decks.map((deck) => <DeckCard key={deck.id} deck={deck} />)}
+              </div>
+            )}
+          </>
         )}
 
         {tier === 'free' && decks.length >= 1 && (

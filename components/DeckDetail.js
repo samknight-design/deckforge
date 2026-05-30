@@ -13,7 +13,7 @@ import InsightsSheet from './InsightsSheet';
 import ImportDeckModal from './ImportDeckModal';
 import UpgradeModal from './UpgradeModal';
 
-const TABS = ['Cards', 'Stats', 'Notes'];
+const TABS = ['Cards', 'Stats', 'Notes', 'Insights'];
 
 function ProgressBar({ value, max }) {
   const pct = Math.min(100, (value / max) * 100);
@@ -25,7 +25,7 @@ function ProgressBar({ value, max }) {
   );
 }
 
-function CollapsibleGroup({ name, cards, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner }) {
+function CollapsibleGroup({ name, cards, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner, onToggleFoil }) {
   const [open, setOpen] = useState(true);
   const count = cards.reduce((s, c) => s + (c.quantity || 1), 0);
 
@@ -54,6 +54,7 @@ function CollapsibleGroup({ name, cards, format, hasCommander, onQuantityChange,
               onQuantityChange={onQuantityChange}
               onMakeCommander={format === 'commander' && card.is_legendary ? onMakeCommander : null}
               onMakePartner={format === 'commander' && card.is_legendary ? onMakePartner : null}
+              onToggleFoil={onToggleFoil}
             />
           ))}
         </div>
@@ -69,7 +70,6 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
   const [isEditingName, setIsEditingName] = useState(false);
   const [editedName, setEditedName] = useState(deck.name);
   const [notes, setNotes] = useState(deck.notes || '');
-  const [showInsights, setShowInsights] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [lastInsight, setLastInsight] = useState(null);
@@ -128,7 +128,6 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
   );
 
   const [showWarnings, setShowWarnings] = useState(false);
-  const [insightToShow, setInsightToShow] = useState(null); // which insight to pass to the sheet
 
   // Fetch latest stored insight on mount
   useEffect(() => {
@@ -169,6 +168,13 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
       await supabase.from('deck_cards').update({ quantity: newQty }).eq('id', card.id);
       setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, quantity: newQty } : c));
     }
+  };
+
+  const toggleCardFoil = async (card) => {
+    const next = !card.is_foil;
+    const { error } = await supabase.from('deck_cards').update({ is_foil: next }).eq('id', card.id);
+    if (error) { showToast('A foil/non-foil of this card already exists in the deck', 'error'); return; }
+    setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, is_foil: next } : c));
   };
 
   const makeCommander = async (card) => {
@@ -212,8 +218,6 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
       showToast(`✓ Imported ${imported} cards`, 'success');
     }
   };
-
-  const handleInsights = () => setShowInsights(true);
 
   const deleteDeck = async () => {
     if (!confirm('Delete this deck? This cannot be undone.')) return;
@@ -302,12 +306,12 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
           >
             <div className="flex-1 min-w-0">
               <div className="text-sm font-medium" style={{ color: isPublic ? '#10b981' : '#f1f5f9' }}>
-                {isPublic ? '🌐 Public' : '🔒 Private'}
+                {isPublic ? '🌐 Public' : '🔒 Currently private'}
               </div>
-              <div className="text-xs" style={{ color: '#64748b' }}>
+              <div className="text-xs" style={{ color: isPublic ? '#64748b' : '#a78bfa' }}>
                 {canPublish
-                  ? (isPublic ? 'Listed in Community — others can view, like & clone' : 'Only you can see this deck')
-                  : 'Run AI Insights to set a bracket before publishing'}
+                  ? (isPublic ? 'Others can view, like & clone it' : 'Make it public to share it, collect likes & earn XP →')
+                  : 'Run AI Insights to set a bracket, then you can publish'}
               </div>
             </div>
             {isPublic && (
@@ -335,12 +339,12 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
         <CommanderPanel deck={deck} />
 
         {/* Internal tab bar */}
-        <div className="flex px-4 pt-1 pb-0 gap-1">
+        <div className="flex px-3 pt-1 pb-0 gap-1">
           {TABS.map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className="px-4 py-2.5 text-sm font-semibold rounded-t-xl transition-all"
+              className="flex-1 px-2 py-2.5 text-sm font-semibold rounded-t-xl transition-all"
               style={{
                 background: activeTab === tab ? '#0a0e1a' : 'transparent',
                 color: activeTab === tab ? '#f59e0b' : '#94a3b8',
@@ -355,7 +359,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
       </div>
 
       {/* Tab content */}
-      <div className="flex-1 overflow-y-auto scroll-y pb-20">
+      <div className="flex-1 overflow-y-auto scroll-y pb-4">
         {activeTab === 'Cards' && (
           <div className="px-3 pt-3">
             {/* Validation warnings */}
@@ -464,6 +468,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
                     onQuantityChange={updateQuantity}
                     onMakeCommander={makeCommander}
                     onMakePartner={makePartner}
+                    onToggleFoil={toggleCardFoil}
                   />
                 ))}
               </div>
@@ -492,46 +497,21 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
             <p className="text-xs text-text-dim mt-2">Auto-saved</p>
           </div>
         )}
-      </div>
 
-      {/* Insights FAB */}
-      <div
-        className="absolute bottom-0 left-0 right-0 px-4 pb-3 pt-2"
-        style={{ background: 'linear-gradient(to top, #0a0e1a 70%, transparent)', pointerEvents: 'none' }}
-      >
-        <div className="flex gap-2" style={{ pointerEvents: 'all' }}>
-          {lastInsight && (
-            <button
-              onClick={() => { setInsightToShow(lastInsight); setShowInsights(true); }}
-              className="rounded-2xl py-3.5 px-4 text-sm font-semibold flex items-center justify-center gap-1.5 flex-shrink-0"
-              style={{ background: '#1a2235', border: '1px solid rgba(124,58,237,0.4)', color: '#a78bfa', minHeight: 48 }}
-            >
-              📊 Previous
-            </button>
-          )}
-          <button
-            onClick={() => { setInsightToShow(null); setShowInsights(true); }}
-            className="flex-1 rounded-2xl py-3.5 text-sm font-bold flex items-center justify-center gap-2"
-            style={{ background: 'linear-gradient(135deg, #7c3aed, #f59e0b)', color: '#fff', minHeight: 48 }}
-          >
-            ✨ {lastInsight ? 'Generate New' : 'Generate Insights'}
-          </button>
-        </div>
+        {activeTab === 'Insights' && (
+          <InsightsSheet
+            deckId={deck.id}
+            deck={deck}
+            tier={tier}
+            hasChanged={hasChanged}
+            lastInsight={lastInsight}
+            onInsightGenerated={(ni) => setLastInsight(ni)}
+            inline
+          />
+        )}
       </div>
 
       {/* Modals */}
-      {showInsights && (
-        <InsightsSheet
-          deckId={deck.id}
-          deck={deck}
-          tier={tier}
-          hasChanged={hasChanged}
-          lastInsight={insightToShow}
-          autoGenerate={!insightToShow}
-          onInsightGenerated={(newInsight) => setLastInsight(newInsight)}
-          onClose={() => setShowInsights(false)}
-        />
-      )}
       {showImport && (
         <ImportDeckModal
           deckId={deck.id}

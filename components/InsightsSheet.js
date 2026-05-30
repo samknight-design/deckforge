@@ -225,7 +225,7 @@ function LegacyInsight({ content }) {
   );
 }
 
-export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsight, autoGenerate, onInsightGenerated, onClose }) {
+export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsight, autoGenerate, onInsightGenerated, onClose, inline = false }) {
   const [insight, setInsight] = useState(lastInsight);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -277,6 +277,65 @@ export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsi
   const bracket = insight?.bracket_estimate;
   const data = insight?.data;
 
+  const contentEl = (
+    <>
+      {!insight && !loading && (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <div className="text-5xl mb-4">🧙</div>
+          <h3 className="font-semibold text-text-primary mb-2">Ready to Analyse</h3>
+          <p className="text-sm text-text-secondary max-w-xs">
+            Get a bracket prediction, cards to add or cut, and a strategy breakdown for your deck.
+          </p>
+        </div>
+      )}
+
+      {loading && (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <div className="w-10 h-10 border-2 border-gold border-t-transparent rounded-full animate-spin mb-4" />
+          <p className="text-text-secondary text-sm">Claude is analysing your deck…</p>
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-xl p-4 mb-4" style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)' }}>
+          <p className="text-red-400 text-sm">{error}</p>
+        </div>
+      )}
+
+      {!loading && insight && (
+        data ? <Dashboard data={data} onPick={pickCard} /> : <LegacyInsight content={insight.content} />
+      )}
+
+      {previewLoading && <p className="text-xs text-center mt-2" style={{ color: '#64748b' }}>Loading card…</p>}
+    </>
+  );
+
+  const generateBtn = (!insight || hasChanged || !data) && (
+    <button
+      onClick={() => generateInsights(true)}
+      disabled={loading}
+      className="rounded-xl py-3 px-4 text-sm font-semibold disabled:opacity-50"
+      style={{ background: 'linear-gradient(135deg, #7c3aed, #f59e0b)', color: '#fff', minHeight: 44, flex: 2 }}
+    >
+      {loading ? '✨ Analysing…' : insight ? '🔄 Regenerate' : '✨ Generate Insights'}
+    </button>
+  );
+
+  const cardPreview = previewCard && (
+    <CardModal card={previewCard} format={deck?.format} hasCommander={false} onClose={() => setPreviewCard(null)} onToggleFoil={null} />
+  );
+
+  // Inline mode — rendered inside the deck's Insights tab (no sheet/backdrop).
+  if (inline) {
+    return (
+      <div className="px-4 py-4">
+        {generateBtn && <div className="flex mb-4">{generateBtn}</div>}
+        {contentEl}
+        {cardPreview}
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="fixed inset-0 bg-black/60 backdrop" onClick={onClose} style={{ zIndex: 300 }} />
@@ -284,108 +343,34 @@ export default function InsightsSheet({ deckId, deck, tier, hasChanged, lastInsi
         className="fixed inset-x-0 bottom-0 rounded-t-2xl sheet-enter flex flex-col"
         style={{ background: '#111827', border: '1px solid #1e2d47', zIndex: 310, maxHeight: '85vh' }}
       >
-        {/* Handle */}
         <div className="flex justify-center pt-3 pb-1 flex-shrink-0">
           <div className="w-10 h-1 rounded-full" style={{ background: '#1e2d47' }} />
         </div>
-
-        {/* Header */}
         <div className="flex items-center justify-between px-4 pb-3 flex-shrink-0">
           <div className="flex items-center gap-3">
             <span className="text-xl">✨</span>
             <div>
               <h2 className="font-bold text-text-primary">AI Deck Insights</h2>
               {insight?.generated_at && (
-                <p className="text-xs text-text-secondary">
-                  {insight.cached ? 'Cached • ' : ''}
-                  {new Date(insight.generated_at).toLocaleDateString()}
-                </p>
+                <p className="text-xs text-text-secondary">{insight.cached ? 'Cached • ' : ''}{new Date(insight.generated_at).toLocaleDateString()}</p>
               )}
             </div>
           </div>
           {bracket && (
-            <div
-              className="rounded-full px-3 py-1 text-sm font-bold"
-              style={{
-                background: `${BRACKET_COLORS[bracket]}20`,
-                color: BRACKET_COLORS[bracket],
-                border: `1px solid ${BRACKET_COLORS[bracket]}40`,
-              }}
-            >
+            <div className="rounded-full px-3 py-1 text-sm font-bold" style={{ background: `${BRACKET_COLORS[bracket]}20`, color: BRACKET_COLORS[bracket], border: `1px solid ${BRACKET_COLORS[bracket]}40` }}>
               B{bracket} — {BRACKET_LABELS[bracket]}
             </div>
           )}
         </div>
-
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto scroll-y px-4 pb-4">
-          {!insight && !loading && (
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <div className="text-5xl mb-4">🧙</div>
-              <h3 className="font-semibold text-text-primary mb-2">Ready to Analyse</h3>
-              <p className="text-sm text-text-secondary max-w-xs">
-                Get a bracket prediction, cards to add or cut, and a strategy breakdown for your deck.
-              </p>
-            </div>
-          )}
-
-          {loading && (
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <div className="w-10 h-10 border-2 border-gold border-t-transparent rounded-full animate-spin mb-4" />
-              <p className="text-text-secondary text-sm">Claude is analysing your deck…</p>
-            </div>
-          )}
-
-          {error && (
-            <div
-              className="rounded-xl p-4 mb-4"
-              style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)' }}
-            >
-              <p className="text-red-400 text-sm">{error}</p>
-            </div>
-          )}
-
-          {!loading && insight && (
-            data
-              ? <Dashboard data={data} onPick={pickCard} />
-              : <LegacyInsight content={insight.content} />
-          )}
-
-          {previewLoading && (
-            <p className="text-xs text-center mt-2" style={{ color: '#64748b' }}>Loading card…</p>
-          )}
-        </div>
-
-        {/* Action buttons */}
+        <div className="flex-1 overflow-y-auto scroll-y px-4 pb-4">{contentEl}</div>
         <div className="flex gap-3 px-4 py-3 flex-shrink-0" style={{ borderTop: '1px solid #1e2d47' }}>
-          <button
-            onClick={onClose}
-            className="flex-1 rounded-xl py-3 text-sm font-medium"
-            style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 44 }}
-          >
+          <button onClick={onClose} className="flex-1 rounded-xl py-3 text-sm font-medium" style={{ background: '#1a2235', border: '1px solid #1e2d47', color: '#94a3b8', minHeight: 44 }}>
             Close
           </button>
-          {(!insight || hasChanged || !data) && (
-            <button
-              onClick={() => generateInsights(true)}
-              disabled={loading}
-              className="flex-2 rounded-xl py-3 px-4 text-sm font-semibold disabled:opacity-50"
-              style={{ background: 'linear-gradient(135deg, #7c3aed, #f59e0b)', color: '#fff', minHeight: 44, flex: 2 }}
-            >
-              {loading ? '✨ Analysing…' : insight ? '🔄 Regenerate' : '✨ Generate Insights'}
-            </button>
-          )}
+          {generateBtn}
         </div>
       </div>
-
-      {previewCard && (
-        <CardModal
-          card={previewCard}
-          format={deck?.format}
-          hasCommander={false}
-          onClose={() => setPreviewCard(null)}
-        />
-      )}
+      {cardPreview}
     </>
   );
 }

@@ -2,10 +2,11 @@
 
 import { ManaCostDisplay, ColourPips } from './ColourPip';
 
-export default function CardModal({ card, format, hasCommander, onClose, onMakeCommander, onMakePartner }) {
+export default function CardModal({ card, format, hasCommander, onClose, onMakeCommander, onMakePartner, onToggleFoil }) {
   const formatPrice = (v) => (v != null ? `€${parseFloat(v).toFixed(2)}` : '—');
   const formatUsd = (v) => (v != null ? `$${parseFloat(v).toFixed(2)}` : '—');
   const isCommander = format === 'commander';
+  const isFoil = !!card.is_foil;
 
   return (
     <>
@@ -103,6 +104,20 @@ export default function CardModal({ card, format, hasCommander, onClose, onMakeC
               <div className="font-semibold text-text-secondary text-sm">{formatUsd(card.price_usd)}</div>
             </div>
           </div>
+
+          {/* Foil toggle (deck context only) */}
+          {onToggleFoil && (
+            <button
+              onClick={onToggleFoil}
+              className="w-full flex items-center justify-between rounded-xl px-4 py-3 mb-4"
+              style={{ background: isFoil ? 'rgba(124,58,237,0.15)' : '#1a2235', border: `1px solid ${isFoil ? '#7c3aed' : '#1e2d47'}` }}
+            >
+              <span className="text-sm font-medium" style={{ color: isFoil ? '#c4b5fd' : '#94a3b8' }}>✦ Foil</span>
+              <span className="relative rounded-full" style={{ width: 40, height: 22, background: isFoil ? '#7c3aed' : '#334155' }}>
+                <span className="absolute rounded-full bg-white transition-all" style={{ width: 18, height: 18, top: 2, left: isFoil ? 20 : 2 }} />
+              </span>
+            </button>
+          )}
 
           {/* Color identity */}
           {card.color_identity?.length > 0 && (

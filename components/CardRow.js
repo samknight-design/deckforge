@@ -1,10 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { ManaCostDisplay, ColourPips } from './ColourPip';
+import { ManaCostDisplay } from './ColourPip';
 import CardModal from './CardModal';
 
-export default function CardRow({ card, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner }) {
+export default function CardRow({ card, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner, onToggleFoil }) {
   const [showModal, setShowModal] = useState(false);
   const isCommander = card.is_commander;
   const isPartner = card.is_partner;
@@ -25,12 +25,12 @@ export default function CardRow({ card, format, hasCommander, onQuantityChange, 
               src={card.image_uri}
               alt={card.card_name}
               className="rounded-lg"
-              style={{ width: 36, height: 50, objectFit: 'cover' }}
+              style={{ width: 40, height: 40, objectFit: 'cover', objectPosition: 'center 16%' }}
             />
           ) : (
             <div
               className="rounded-lg flex items-center justify-center"
-              style={{ width: 36, height: 50, background: '#1a2235', border: '1px solid #1e2d47' }}
+              style={{ width: 40, height: 40, background: '#1a2235', border: '1px solid #1e2d47' }}
             >
               <span className="text-sm">🃏</span>
             </div>
@@ -65,12 +65,9 @@ export default function CardRow({ card, format, hasCommander, onQuantityChange, 
             )}
           </div>
           <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-xs text-text-dim truncate" style={{ maxWidth: 120 }}>
+            <span className="text-xs text-text-dim truncate" style={{ maxWidth: 160 }}>
               {card.type_line?.split(' — ')[0]}
             </span>
-            {card.color_identity?.length > 0 && (
-              <ColourPips colors={card.color_identity} size={12} />
-            )}
           </div>
         </div>
 
@@ -109,6 +106,7 @@ export default function CardRow({ card, format, hasCommander, onQuantityChange, 
           onClose={() => setShowModal(false)}
           onMakeCommander={onMakeCommander ? () => { onMakeCommander(card); setShowModal(false); } : null}
           onMakePartner={onMakePartner ? () => { onMakePartner(card); setShowModal(false); } : null}
+          onToggleFoil={onToggleFoil ? () => onToggleFoil(card) : null}
         />
       )}
     </>
