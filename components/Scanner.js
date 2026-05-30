@@ -217,7 +217,7 @@ export default function Scanner({
     setBenchRunning(true);
     setBenchResult(null);
     try {
-      const r = await benchmarkOcr(videoRef.current, 5);
+      const r = await benchmarkOcr(videoRef.current, 5, { vfW: 232, vfH: 324 });
       setBenchResult(r);
     } catch (e) {
       setBenchResult({ error: String(e?.message || e) });
@@ -832,6 +832,15 @@ export default function Scanner({
                         <p className="text-sm mt-1" style={{ color: '#f1f5f9' }}>
                           read: “{benchResult.name || '(nothing)'}”
                         </p>
+                        {benchResult.preview && (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={benchResult.preview}
+                            alt="OCR crop"
+                            className="mx-auto mt-2 rounded"
+                            style={{ maxWidth: 150, border: '1px solid #1e2d47' }}
+                          />
+                        )}
                       </>
                     )}
                   </div>
