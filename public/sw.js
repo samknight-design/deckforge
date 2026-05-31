@@ -1,6 +1,6 @@
-const CACHE_NAME = 'deckforge-v7';
-const STATIC_CACHE = 'deckforge-static-v7';
-const DECK_CACHE = 'deckforge-decks-v7';
+const CACHE_NAME = 'deckforge-v8';
+const STATIC_CACHE = 'deckforge-static-v8';
+const DECK_CACHE = 'deckforge-decks-v8';
 
 const STATIC_ASSETS = [
   '/',

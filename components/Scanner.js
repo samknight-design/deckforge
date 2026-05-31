@@ -49,12 +49,12 @@ function buildScryfallQuery({ name, colors, cardType, cmc, rarity }) {
 }
 
 // ── Auto-scan tuning ─────────────────────────────────────────────────────────
-const FRAME_MS         = 150;  // how often to sample (ms)
-const FRAMES_PREVIEW   = 2;    // stable frames before showing green (~300ms)
-const FRAMES_TRIGGER   = 4;    // stable frames before firing scan (~600ms)
+const FRAME_MS         = 120;  // how often to sample (ms)
+const FRAMES_PREVIEW   = 1;    // stable frames before showing green (~120ms)
+const FRAMES_TRIGGER   = 2;    // stable frames before firing scan (~240ms) — matching is sub-second so the long stability wait was the dominant latency
 const MOTION_THRESH    = 30;   // avg pixel diff considered "still" — higher = more wiggle room for hand-held
-const COOLDOWN_MS      = 1500; // pause after a failed scan
-const SUCCESS_COOLDOWN = 900;  // brief pause after an auto-add (Quick Scan) before re-arming
+const COOLDOWN_MS      = 1000; // pause after a failed scan
+const SUCCESS_COOLDOWN = 600;  // brief pause after an auto-add (Quick Scan) before re-arming
 
 export default function Scanner({
   decks: initialDecks,
