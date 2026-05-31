@@ -205,14 +205,13 @@ export default function Scanner({
     return () => stopCamera();
   }, [mode, isOnline, startCamera, stopCamera]);
 
-  // Preload the hash DB and start warming opencv.js when entering Scan mode.
-  // Both are fire-and-forget: opencv is ~7–8 MB WASM and may fail entirely on
-  // older mobile browsers — when that happens we silently fall back to the
-  // lightweight gradient detector, so the scanner ALWAYS works.
+  // Preload the hash DB on entry. opencv.js is NOT loaded here — it's opt-in
+  // (the "Enable HQ detect" button) because injecting it has wedged the page
+  // on some mobile browsers. Default path is the lightweight gradient
+  // detector, which never blocks.
   useEffect(() => {
     if (mode === 'Scan' && cameraReady) {
       loadMatchDb('/hashes/ltr.json').catch(() => {});
-      warmCv(); // returns immediately; never throws
     }
   }, [mode, cameraReady]);
 
@@ -859,6 +858,8 @@ export default function Scanner({
                   >
                     {benchResult.error ? (
                       <p className="text-xs" style={{ color: '#f87171' }}>Match error: {benchResult.error}</p>
+                    ) : benchResult.info ? (
+                      <p className="text-xs" style={{ color: '#94a3b8' }}>{benchResult.info}</p>
                     ) : benchResult.parity !== undefined ? (
                       <>
                         <p className="text-base font-bold" style={{ color: benchResult.parity <= 8 ? '#10b981' : benchResult.parity <= 24 ? '#f59e0b' : '#f87171' }}>
@@ -907,7 +908,7 @@ export default function Scanner({
                     })()}
                   </div>
                 )}
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap justify-center">
                   <button
                     onPointerDown={runBench}
                     disabled={benchRunning || !cameraReady}
@@ -923,6 +924,14 @@ export default function Scanner({
                     style={{ background: 'rgba(17,24,39,0.92)', color: '#c4b5fd', border: '1px solid #a78bfa' }}
                   >
                     🧪 Self-test
+                  </button>
+                  <button
+                    onPointerDown={() => { warmCv(); setBenchResult({ info: 'Loading opencv… (this may take 10s on slow connections). Try Match test again in a few seconds.' }); }}
+                    disabled={benchRunning}
+                    className="rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                    style={{ background: 'rgba(17,24,39,0.92)', color: '#94a3b8', border: '1px solid #1e2d47' }}
+                  >
+                    ⚙️ Try HQ detect
                   </button>
                 </div>
               </div>
