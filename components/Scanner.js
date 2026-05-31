@@ -7,7 +7,7 @@ import { showToast } from './Toast';
 import { showReward } from './RewardToast';
 import { formatEurTotal } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
-import { loadMatchDb, matchCardVoted, matchDbInfo, previewCardCrop, hashImageElement, hammingHex, warmCv } from '@/lib/cardMatch';
+import { loadMatchDb, matchCardVoted, matchDbInfo, previewCardCrop, hashImageElement, hammingHex, warmCv, cvStatus } from '@/lib/cardMatch';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -205,12 +205,14 @@ export default function Scanner({
     return () => stopCamera();
   }, [mode, isOnline, startCamera, stopCamera]);
 
-  // Preload the hash DB and warm opencv.js when entering Scan mode so the first
-  // match isn't paying load cost (opencv is ~7–8 MB WASM — load it once, lazily).
+  // Preload the hash DB and start warming opencv.js when entering Scan mode.
+  // Both are fire-and-forget: opencv is ~7–8 MB WASM and may fail entirely on
+  // older mobile browsers — when that happens we silently fall back to the
+  // lightweight gradient detector, so the scanner ALWAYS works.
   useEffect(() => {
     if (mode === 'Scan' && cameraReady) {
       loadMatchDb('/hashes/ltr.json').catch(() => {});
-      warmCv().catch(() => {});
+      warmCv(); // returns immediately; never throws
     }
   }, [mode, cameraReady]);
 
@@ -221,13 +223,21 @@ export default function Scanner({
     setBenchRunning(true);
     setBenchResult(null);
     try {
-      await loadMatchDb('/hashes/ltr.json');
-      await warmCv();
-      const last = await matchCardVoted(videoRef.current, { vfW: 232, vfH: 324 }, 5);
-      const preview = await previewCardCrop(videoRef.current, { vfW: 232, vfH: 324 });
-      const info = matchDbInfo();
-      if (!last) setBenchResult({ error: 'No match (camera not ready?)' });
-      else setBenchResult({ ...last, median: last.ms, preview, dbCount: info?.n });
+      // Hard 10s timeout so the button can NEVER stay stuck. If the match
+      // takes longer than that something has gone wrong (opencv hung, etc.) —
+      // we just report it and the user can try again.
+      const result = await Promise.race([
+        (async () => {
+          await loadMatchDb('/hashes/ltr.json');
+          const last = await matchCardVoted(videoRef.current, { vfW: 232, vfH: 324 }, 5);
+          const preview = await previewCardCrop(videoRef.current, { vfW: 232, vfH: 324 });
+          const info = matchDbInfo();
+          if (!last) return { error: 'No match (camera not ready?)' };
+          return { ...last, median: last.ms, preview, dbCount: info?.n, cv: cvStatus() };
+        })(),
+        new Promise((resolve) => setTimeout(() => resolve({ error: 'Timeout — opencv may be slow loading. Try again.' }), 10000)),
+      ]);
+      setBenchResult(result);
     } catch (e) {
       setBenchResult({ error: String(e?.message || e) });
     } finally {
@@ -876,6 +886,9 @@ export default function Scanner({
                           </p>
                           <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
                             votes {benchResult.votes}/{benchResult.frames} · {benchResult.detected ? '✓ card detected' : '✗ no detect'} · {benchResult.confident ? 'CONFIDENT ✓' : 'fallback → Claude'}
+                          </p>
+                          <p className="text-xs mt-0.5" style={{ color: '#475569' }}>
+                            engine: {benchResult.engine || 'unknown'} · cv: {benchResult.cv || 'unknown'}
                           </p>
                           <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
                             dist {benchResult.distance}/{total} · {benchResult.median}ms · DB {benchResult.dbCount}
