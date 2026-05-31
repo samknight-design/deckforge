@@ -27,7 +27,7 @@ function ProgressBar({ value, max }) {
   );
 }
 
-function CollapsibleGroup({ name, cards, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner, onToggleFoil }) {
+function CollapsibleGroup({ name, cards, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner, onToggleFoil, onChangeVariant }) {
   const [open, setOpen] = useState(true);
   const count = cards.reduce((s, c) => s + (c.quantity || 1), 0);
 
@@ -57,6 +57,7 @@ function CollapsibleGroup({ name, cards, format, hasCommander, onQuantityChange,
               onMakeCommander={format === 'commander' && card.is_legendary ? onMakeCommander : null}
               onMakePartner={format === 'commander' && card.is_legendary ? onMakePartner : null}
               onToggleFoil={onToggleFoil}
+              onChangeVariant={onChangeVariant}
             />
           ))}
         </div>
@@ -177,6 +178,29 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
     const { error } = await supabase.from('deck_cards').update({ is_foil: next }).eq('id', card.id);
     if (error) { showToast('A foil/non-foil of this card already exists in the deck', 'error'); return; }
     setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, is_foil: next } : c));
+  };
+
+  // Swap a deck card to a different printing (set / full-art / borderless etc).
+  // Picker passes a normalised card payload from /api/scryfall/prints; we need
+  // to (a) ensure the new printing is in card_cache, (b) point the deck_cards
+  // row at it, and (c) merge the new fields into local state.
+  const changeCardVariant = async (card, newPrint) => {
+    if (!newPrint?.scryfall_id) return;
+    if (newPrint.scryfall_id === card.scryfall_id) return; // no-op
+    // Best-effort cache upsert via the server (handles RLS).
+    fetch(`/api/scryfall/card?id=${encodeURIComponent(newPrint.scryfall_id)}`).catch(() => {});
+    const { error } = await supabase.from('deck_cards')
+      .update({ scryfall_id: newPrint.scryfall_id })
+      .eq('id', card.id);
+    if (error) {
+      showToast('A copy of this printing is already in the deck', 'error');
+      return;
+    }
+    setCards((prev) => prev.map((c) => c.id === card.id
+      ? { ...c, ...newPrint, id: c.id, quantity: c.quantity, is_foil: c.is_foil, is_commander: c.is_commander, is_partner: c.is_partner }
+      : c
+    ));
+    showToast(`✓ Swapped to ${newPrint.set_name}`, 'success');
   };
 
   const makeCommander = async (card) => {
@@ -471,6 +495,7 @@ export default function DeckDetail({ deck: initialDeck, initialCards, tier, user
                     onMakeCommander={makeCommander}
                     onMakePartner={makePartner}
                     onToggleFoil={toggleCardFoil}
+                    onChangeVariant={changeCardVariant}
                   />
                 ))}
               </div>

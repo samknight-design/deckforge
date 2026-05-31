@@ -1,10 +1,13 @@
 'use client';
 
+import { useState } from 'react';
 import { ManaCostDisplay, ColourPips } from './ColourPip';
 import { formatEurTotal, symbolFor } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
+import VariantPicker from './VariantPicker';
 
-export default function CardModal({ card, format, hasCommander, onClose, onMakeCommander, onMakePartner, onToggleFoil }) {
+export default function CardModal({ card, format, hasCommander, onClose, onMakeCommander, onMakePartner, onToggleFoil, onChangeVariant }) {
+  const [showVariants, setShowVariants] = useState(false);
   const currency = typeof window !== 'undefined' ? getCurrency() : 'GBP';
   const formatPrice = (v) => formatEurTotal(v, currency);
   const formatUsd = (v) => (v != null ? `$${parseFloat(v).toFixed(2)}` : '—');
@@ -87,7 +90,17 @@ export default function CardModal({ card, format, hasCommander, onClose, onMakeC
             )}
             <span className="text-sm text-text-secondary">CMC: {card.cmc}</span>
             {card.set_name && (
-              <span className="text-xs text-text-dim">{card.set_name}</span>
+              onChangeVariant ? (
+                <button
+                  onClick={() => setShowVariants(true)}
+                  className="text-xs font-medium"
+                  style={{ color: '#a78bfa' }}
+                >
+                  {card.set_name} · Change ›
+                </button>
+              ) : (
+                <span className="text-xs text-text-dim">{card.set_name}</span>
+              )
             )}
           </div>
 
@@ -166,6 +179,15 @@ export default function CardModal({ card, format, hasCommander, onClose, onMakeC
           </button>
         </div>
       </div>
+
+      {showVariants && onChangeVariant && (
+        <VariantPicker
+          cardName={card.card_name}
+          currentScryfallId={card.scryfall_id}
+          onPick={(p) => { onChangeVariant(p); setShowVariants(false); }}
+          onDismiss={() => setShowVariants(false)}
+        />
+      )}
     </>
   );
 }

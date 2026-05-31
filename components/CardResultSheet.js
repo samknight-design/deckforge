@@ -5,14 +5,18 @@ import Image from 'next/image';
 import { ManaCostDisplay, ColourPips } from './ColourPip';
 import { formatEurTotal } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
+import VariantPicker from './VariantPicker';
 
 const NEW_DECK = '__new__';
 
-export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDismiss }) {
+export default function CardResultSheet({ card: initialCard, decks, activeDeckId, onAdd, onDismiss }) {
+  // Allow the user to swap to a different printing in-place before saving.
+  const [card, setCard] = useState(initialCard);
   // If activeDeckId is null (scanner had "New Deck" selected) or no decks exist, pre-select __new__
   const [selectedDeckId, setSelectedDeckId] = useState(activeDeckId || decks[0]?.id || NEW_DECK);
   const [adding, setAdding] = useState(false);
   const [isFoil, setIsFoil] = useState(false);
+  const [showVariants, setShowVariants] = useState(false);
 
   const handleAdd = async () => {
     if (!selectedDeckId) return;
@@ -88,9 +92,18 @@ export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDi
                 {card.type_line}
               </p>
               {card.set_name && (
-                <p className="text-xs mb-2 truncate" style={{ color: '#64748b' }}>
-                  {card.set_name}{card.set_code ? ` · ${card.set_code.toUpperCase()}` : ''}
-                </p>
+                <div className="flex items-center gap-2 mb-2 min-w-0">
+                  <p className="text-xs truncate" style={{ color: '#64748b' }}>
+                    {card.set_name}{card.set_code ? ` · ${card.set_code.toUpperCase()}` : ''}
+                  </p>
+                  <button
+                    onClick={() => setShowVariants(true)}
+                    className="text-xs font-medium flex-shrink-0"
+                    style={{ color: '#a78bfa' }}
+                  >
+                    Change ›
+                  </button>
+                </div>
               )}
               <div className="flex items-center gap-2 mb-2">
                 <ManaCostDisplay manaCost={card.mana_cost} size={16} />
@@ -187,6 +200,15 @@ export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDi
           </div>
         </div>
       </div>
+
+      {showVariants && (
+        <VariantPicker
+          cardName={card.card_name}
+          currentScryfallId={card.scryfall_id}
+          onPick={(p) => { setCard({ ...p, __engine: card.__engine }); setShowVariants(false); }}
+          onDismiss={() => setShowVariants(false)}
+        />
+      )}
     </>
   );
 }

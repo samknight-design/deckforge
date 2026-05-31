@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { ManaCostDisplay } from './ColourPip';
 import CardModal from './CardModal';
 
-export default function CardRow({ card, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner, onToggleFoil }) {
+export default function CardRow({ card, format, hasCommander, onQuantityChange, onMakeCommander, onMakePartner, onToggleFoil, onChangeVariant }) {
   const [showModal, setShowModal] = useState(false);
   const isCommander = card.is_commander;
   const isPartner = card.is_partner;
@@ -102,6 +102,7 @@ export default function CardRow({ card, format, hasCommander, onQuantityChange, 
           onMakeCommander={onMakeCommander ? () => { onMakeCommander(card); setShowModal(false); } : null}
           onMakePartner={onMakePartner ? () => { onMakePartner(card); setShowModal(false); } : null}
           onToggleFoil={onToggleFoil ? () => onToggleFoil(card) : null}
+          onChangeVariant={onChangeVariant ? (newPrint) => onChangeVariant(card, newPrint) : null}
         />
       )}
     </>
