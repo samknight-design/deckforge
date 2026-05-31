@@ -7,7 +7,7 @@ import { showToast } from './Toast';
 import { showReward } from './RewardToast';
 import { formatEurTotal } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
-import { loadMatchDb, matchCardVoted, matchDbInfo, previewCardCrop, hashImageElement, hammingHex } from '@/lib/cardMatch';
+import { loadMatchDb, matchCardVoted } from '@/lib/cardMatch';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -82,10 +82,6 @@ export default function Scanner({
   const [isOnline, setIsOnline]         = useState(true);
   const [scanState, setScanState]       = useState('idle'); // idle | stable | scanning | cooldown
 
-  // ── Phase 0 OCR benchmark (TEMPORARY — remove before Phase 1 ships) ──
-  const [benchResult, setBenchResult] = useState(null);
-  const [benchRunning, setBenchRunning] = useState(false);
-
   // ── Quick Scan (Pro only) ────────────────────────────
   const [quickScan, setQuickScan]           = useState(false); // auto-scan + auto-add, no confirm prompt
   const [quickScanCount, setQuickScanCount] = useState(0);     // session counter, starts at 0
@@ -127,7 +123,7 @@ export default function Scanner({
   const frameIntervalRef = useRef(null);
   const frameCheckCbRef  = useRef(null); // latest-callback-ref pattern
   const scanCountRef     = useRef(initialScanCount);
-  const scanLimitRef     = useRef(tier === 'pro' ? Infinity : 25);
+  const scanLimitRef     = useRef(Infinity); // scanning is free + unlimited
   const cameraReadyRef   = useRef(false);
 
   // ── Quick-scan refs (avoid stale-closure issues) ──────
@@ -141,7 +137,7 @@ export default function Scanner({
   const supabase = createClient();
   const router   = useRouter();
 
-  const scanLimit  = tier === 'pro' ? Infinity : 25;
+  const scanLimit  = Infinity; // scanning is free + unlimited
   const isPro      = tier === 'pro';
   const activeDeck = decks.find((d) => d.id === activeDeckId);
   const isNewDeck  = activeDeckId === NEW_DECK;
@@ -149,7 +145,7 @@ export default function Scanner({
   // ── Keep refs in sync ────────────────────────────────
   useEffect(() => { scanCountRef.current = scanCount; }, [scanCount]);
   useEffect(() => { cameraReadyRef.current = cameraReady; }, [cameraReady]);
-  useEffect(() => { scanLimitRef.current = tier === 'pro' ? Infinity : 25; }, [tier]);
+  useEffect(() => { scanLimitRef.current = Infinity; }, [tier]);
   useEffect(() => { quickScanRef.current = quickScan; }, [quickScan]);
   useEffect(() => { activeDeckIdRef.current = activeDeckId; }, [activeDeckId]);
   useEffect(() => { formOpenRef.current = showNewDeckForm; }, [showNewDeckForm]);
@@ -205,54 +201,14 @@ export default function Scanner({
     return () => stopCamera();
   }, [mode, isOnline, startCamera, stopCamera]);
 
-  // Preload the hash DB on entry. opencv.js is NOT loaded here — it's opt-in
-  // (the "Enable HQ detect" button) because injecting it has wedged the page
-  // on some mobile browsers. Default path is the lightweight gradient
-  // detector, which never blocks.
+  // Preload the visual hash DB on entry so the first match is instant. (Still
+  // the LotR spike DB while we build the full Scryfall hash blob — once H1
+  // ships, this becomes the binary /hashes/cards.{bin,idx.json,meta.json}.)
   useEffect(() => {
     if (mode === 'Scan' && cameraReady) {
       loadMatchDb('/hashes/ltr.json').catch(() => {});
     }
   }, [mode, cameraReady]);
-
-  // Phase H0 benchmark: visually match the framed card against the hash DB and
-  // report the result, its distance/separation (confidence) and on-device speed.
-  const runBench = useCallback(async () => {
-    if (!videoRef.current?.videoWidth) return;
-    setBenchRunning(true);
-    setBenchResult(null);
-    try {
-      await loadMatchDb('/hashes/ltr.json');
-      const last = await matchCardVoted(videoRef.current, { vfW: 232, vfH: 324 }, 5);
-      const preview = previewCardCrop(videoRef.current, { vfW: 232, vfH: 324 });
-      const info = matchDbInfo();
-      if (!last) setBenchResult({ error: 'No match (camera not ready?)' });
-      else setBenchResult({ ...last, median: last.ms, preview, dbCount: info?.n });
-    } catch (e) {
-      setBenchResult({ error: String(e?.message || e) });
-    } finally {
-      setBenchRunning(false);
-    }
-  }, []);
-
-  // Phase H0 pipeline self-test: hash a bundled reference image in-browser and
-  // compare to its stored hash. Distance ≈ 0 ⇒ reference⇄camera pipelines agree.
-  const runSelfTest = useCallback(async () => {
-    setBenchRunning(true);
-    setBenchResult(null);
-    try {
-      const meta = await (await fetch('/test-card.json')).json();
-      const img = new Image();
-      img.src = '/test-card.jpg';
-      await img.decode();
-      const bytes = hashImageElement(img);
-      setBenchResult({ parity: hammingHex(bytes, meta.hash), parityName: meta.name, totalBits: bytes.length * 8 });
-    } catch (e) {
-      setBenchResult({ error: String(e?.message || e) });
-    } finally {
-      setBenchRunning(false);
-    }
-  }, []);
 
   // ── Scan-state helper (only re-renders when value changes) ──
   const updateScanState = useCallback((s) => {
@@ -309,9 +265,16 @@ export default function Scanner({
   useEffect(() => () => clearTimeout(cooldownTimerRef.current), []);
 
   // ── Core scan function ────────────────────────────────
+  // Two-stage scan path:
+  //   1. On-device visual hash match (free, instant, no Claude call) — handles
+  //      the vast majority of cards.
+  //   2. Low confidence OR gallery upload → POST /api/scan (Claude Smart Scan
+  //      fallback, also free now — funded by ads on free tier).
+  // Either path returns a card payload; both share the same downstream flow
+  // (Quick Scan auto-add or CardResultSheet confirmation).
   const doScan = useCallback(async (fromBlob = null) => {
     if (isScanningRef.current || inCooldownRef.current || hasResultRef.current) return;
-    if (scanCountRef.current >= scanLimitRef.current || !cameraReadyRef.current) return;
+    if (!cameraReadyRef.current) return;
 
     isScanningRef.current = true;
     updateScanState('scanning');
@@ -319,37 +282,56 @@ export default function Scanner({
     prevFrameRef.current    = null;
     setScanning(true);
 
-    try {
-      const blob = fromBlob || await captureFullFrame();
-      if (!blob) throw new Error('Capture failed');
-
-      const formData = new FormData();
-      formData.append('image', blob, 'scan.jpg');
-      const res  = await fetch('/api/scan', { method: 'POST', body: formData });
-      const data = await res.json();
-
-      if (res.ok && data.card) {
-        setScanCount((c) => c + 1);
-        showReward(data.rewards);
-
-        // Quick Scan: auto-add to the pre-selected deck, no confirm prompt.
-        if (quickScanRef.current && autoAddRef.current) {
-          const added = await autoAddRef.current(data.card); // doAddCard handles its own toast + haptic
+    const finishWithCard = (card, rewards) => {
+      setScanCount((c) => c + 1);
+      if (rewards) showReward(rewards);
+      if (quickScanRef.current && autoAddRef.current) {
+        // Quick Scan: auto-add to the pre-selected deck (no confirm prompt).
+        return autoAddRef.current(card).then((added) => {
           if (added) {
             setQuickScanCount((c) => c + 1);
-            // Require the card to be swapped out before arming the next scan,
-            // so a card left in frame isn't added repeatedly.
             requireMotionRef.current = true;
             startCooldown(SUCCESS_COOLDOWN);
           } else {
             startCooldown();
           }
-        } else {
-          // Normal mode: surface the confirmation sheet.
-          setResult(data.card);
-          if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
-          updateScanState('idle');
+        });
+      }
+      setResult(card);
+      if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+      updateScanState('idle');
+      return Promise.resolve();
+    };
+
+    try {
+      // Path 1: visual match on the live camera (skipped for gallery uploads —
+      // a still image can't be matched against the live <video> motion stream).
+      if (!fromBlob && videoRef.current) {
+        const match = await matchCardVoted(videoRef.current, { vfW: 232, vfH: 324 }, 5);
+        if (match?.confident && match.id) {
+          const res = await fetch('/api/scan/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scryfall_id: match.id }),
+          });
+          const data = await res.json();
+          if (res.ok && data.card) {
+            await finishWithCard(data.card, data.rewards);
+            return;
+          }
+          // Resolve failed — fall through to Claude.
         }
+      }
+
+      // Path 2: Claude Smart Scan fallback (also handles gallery uploads).
+      const blob = fromBlob || await captureFullFrame();
+      if (!blob) throw new Error('Capture failed');
+      const formData = new FormData();
+      formData.append('image', blob, 'scan.jpg');
+      const res  = await fetch('/api/scan', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (res.ok && data.card) {
+        await finishWithCard(data.card, data.rewards);
       } else {
         showToast(data.error || 'Card not recognized — try repositioning', 'error');
         startCooldown();
@@ -591,7 +573,6 @@ export default function Scanner({
     scanState === 'scanning' ? 'Identifying card…' :
     scanState === 'stable'   ? 'Hold still…' :
     scanState === 'cooldown' ? (quickScan ? 'Added · swap in the next card' : 'Trying again shortly…') :
-    scanCount >= scanLimit   ? '' :
     quickScan                ? 'Auto-scanning · fit the whole card in frame' :
     'Fit the whole card in frame · tap to scan';
 
@@ -618,19 +599,6 @@ export default function Scanner({
           </span>
           <span style={{ color: '#94a3b8' }}>▾</span>
         </button>
-        {tier === 'free' && (
-          <div
-            className="rounded-full px-3 py-1 text-xs font-medium"
-            style={{
-              background: scanCount >= scanLimit - 3
-                ? 'rgba(239,68,68,0.9)'
-                : mode === 'Scan' ? 'rgba(17,24,39,0.92)' : '#111827',
-              color: '#f1f5f9', border: '1px solid #1e2d47',
-            }}
-          >
-            {scanCount}/{scanLimit}
-          </div>
-        )}
       </div>
 
       {showDeckPicker && (
@@ -688,8 +656,8 @@ export default function Scanner({
         ))}
       </div>
 
-      {/* Quick Scan toggle — Pro only, Scan mode only */}
-      {mode === 'Scan' && isPro && (
+      {/* Quick Scan toggle — Scan mode only (free for all tiers now) */}
+      {mode === 'Scan' && (
         <button
           onClick={toggleQuickScan}
           className="w-full flex items-center justify-between rounded-xl px-3 py-2 mt-2"
@@ -840,80 +808,6 @@ export default function Scanner({
                 </p>
               </div>
 
-              {/* ── Phase 0 OCR benchmark (TEMPORARY) ── */}
-              <div className="absolute left-0 right-0 flex flex-col items-center gap-2 px-6" style={{ bottom: 112 }}>
-                {benchResult && (
-                  <div
-                    className="rounded-xl px-4 py-3 text-center max-w-xs w-full"
-                    style={{ background: 'rgba(17,24,39,0.95)', border: '1px solid #1e2d47' }}
-                  >
-                    {benchResult.error ? (
-                      <p className="text-xs" style={{ color: '#f87171' }}>Match error: {benchResult.error}</p>
-                    ) : benchResult.parity !== undefined ? (
-                      <>
-                        <p className="text-base font-bold" style={{ color: benchResult.parity <= 8 ? '#10b981' : benchResult.parity <= 24 ? '#f59e0b' : '#f87171' }}>
-                          Pipeline self-test
-                        </p>
-                        <p className="text-sm mt-1" style={{ color: '#f1f5f9' }}>
-                          distance {benchResult.parity}/{benchResult.totalBits}
-                        </p>
-                        <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>
-                          {benchResult.parity === 0 ? 'perfect parity ✓' : benchResult.parity <= 8 ? 'pipelines agree' : 'pipelines DRIFT — bug'} · {benchResult.parityName}
-                        </p>
-                      </>
-                    ) : (() => {
-                      const total = benchResult.totalBits || 256;
-                      const matchPct = Math.round((1 - benchResult.distance / total) * 100);
-                      const gapPct = Math.round(((benchResult.runnerUp - benchResult.distance) / total) * 100);
-                      const color = benchResult.confident ? '#10b981' : '#f59e0b';
-                      return (
-                        <>
-                          <p className="text-base font-bold" style={{ color }}>
-                            {benchResult.name || '(no match)'} {benchResult.confident ? '' : ' · uncertain'}
-                          </p>
-                          <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>
-                            {benchResult.set?.toUpperCase()} #{benchResult.cn} · match {matchPct}% · gap {gapPct}%
-                          </p>
-                          <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
-                            votes {benchResult.votes}/{benchResult.frames} · {benchResult.detected ? '✓ card detected' : '✗ no detect'} · {benchResult.confident ? 'CONFIDENT ✓' : 'fallback → Claude'}
-                          </p>
-                          <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
-                            dist {benchResult.distance}/{total} · {benchResult.median}ms · DB {benchResult.dbCount}
-                          </p>
-                          {benchResult.preview && (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                              src={benchResult.preview}
-                              alt="card crop"
-                              className="mx-auto mt-2 rounded"
-                              style={{ maxWidth: 130, border: '1px solid #1e2d47' }}
-                            />
-                          )}
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-                <div className="flex gap-2">
-                  <button
-                    onPointerDown={runBench}
-                    disabled={benchRunning || !cameraReady}
-                    className="rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
-                    style={{ background: 'rgba(124,58,237,0.9)', color: '#fff', border: '1px solid #a78bfa' }}
-                  >
-                    {benchRunning ? 'Matching…' : '🎯 Match test'}
-                  </button>
-                  <button
-                    onPointerDown={runSelfTest}
-                    disabled={benchRunning}
-                    className="rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
-                    style={{ background: 'rgba(17,24,39,0.92)', color: '#c4b5fd', border: '1px solid #a78bfa' }}
-                  >
-                    🧪 Self-test
-                  </button>
-                </div>
-              </div>
-
               {/* Bottom controls */}
               <div
                 className="absolute bottom-0 left-0 right-0 flex items-center justify-center gap-4 px-6 pb-6 pt-4"
@@ -956,7 +850,7 @@ export default function Scanner({
                 ) : (
                   <button
                     onPointerDown={() => doScan()}
-                    disabled={scanning || scanCount >= scanLimit || !cameraReady}
+                    disabled={scanning || !cameraReady}
                     className="flex items-center gap-2 rounded-full font-bold text-sm disabled:opacity-50 transition-all active:scale-95 flex-shrink-0"
                     style={{
                       paddingLeft: 28, paddingRight: 28, height: 56,
@@ -1167,24 +1061,6 @@ export default function Scanner({
                 </span>
               </button>
             ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── Scan limit overlay ── */}
-      {tier === 'free' && scanCount >= scanLimit && mode === 'Scan' && (
-        <div className="absolute inset-0 flex items-center justify-center p-6 bg-black/70 z-20">
-          <div className="rounded-2xl p-6 text-center max-w-xs" style={{ background: '#111827', border: '1px solid #1e2d47' }}>
-            <div className="text-4xl mb-3">🚫</div>
-            <h3 className="font-bold text-white mb-2">Monthly limit reached</h3>
-            <p className="text-slate-400 text-sm mb-4">You've used all 25 free scans this month.</p>
-            <button
-              onClick={() => router.push('/profile')}
-              className="w-full rounded-xl py-3 font-semibold text-sm"
-              style={{ background: '#f59e0b', color: '#0a0e1a' }}
-            >
-              Upgrade to Pro
-            </button>
           </div>
         </div>
       )}

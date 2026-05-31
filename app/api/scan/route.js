@@ -1,9 +1,13 @@
 import { NextResponse } from 'next/server';
 import { createClient, createServiceClient } from '@/lib/supabase/server';
 import { fetchCardByName, fetchCardBySetAndNumber, fetchCardByNameAndSet } from '@/lib/scryfall';
-import { checkScanLimit, consumeScan } from '@/lib/usage';
 import { recordEvent } from '@/lib/gamification';
 import Anthropic from '@anthropic-ai/sdk';
+
+// "Smart Scan" — Claude vision fallback. Used when the client's on-device
+// visual hash matching isn't confident (low score / no good match), or as the
+// path for gallery uploads where a still photo skips the camera-matching flow.
+// Scanning is free and unlimited; no quota check or consume here.
 
 export async function POST(request) {
   try {
@@ -25,23 +29,8 @@ export async function POST(request) {
       return NextResponse.json({ error: 'No image provided' }, { status: 400 });
     }
 
-    // Round 2: profile + image buffer in parallel
-    const [profileResult, arrayBuffer] = await Promise.all([
-      supabase.from('profiles').select('tier').eq('id', user.id).single(),
-      imageFile.arrayBuffer(),
-    ]);
-
-    const tier = profileResult.data?.tier || 'free';
-
-    // Check scan limit
+    const arrayBuffer = await imageFile.arrayBuffer();
     const serviceClient = createServiceClient();
-    const limitCheck = await checkScanLimit(serviceClient, user.id, tier);
-    if (!limitCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Scan limit reached. Upgrade your plan or add a scan pack for more.' },
-        { status: 429 }
-      );
-    }
 
     // Convert image to base64 (Web API — works everywhere)
     const uint8Array = new Uint8Array(arrayBuffer);
@@ -137,11 +126,9 @@ export async function POST(request) {
       );
     }
 
-    // Cache the resolved printing, consume a scan (quota then credit), award XP.
-    await Promise.all([
-      serviceClient.from('card_cache').upsert(card, { onConflict: 'scryfall_id' }),
-      consumeScan(serviceClient, user.id, tier),
-    ]);
+    // Cache the resolved printing + record the scan event for XP/achievements.
+    // No quota consumption — scanning is free and unlimited.
+    await serviceClient.from('card_cache').upsert(card, { onConflict: 'scryfall_id' });
     const rewards = await recordEvent(serviceClient, user.id, 'scan');
 
     return NextResponse.json({
