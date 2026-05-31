@@ -70,9 +70,20 @@ export default function CardResultSheet({ card, decks, activeDeckId, onAdd, onDi
 
             {/* Card info */}
             <div className="flex-1 min-w-0">
-              <h3 className="font-bold text-text-primary text-base leading-snug mb-1 truncate">
-                {card.card_name}
-              </h3>
+              <div className="flex items-center gap-2 mb-1">
+                <h3 className="font-bold text-text-primary text-base leading-snug truncate flex-1 min-w-0">
+                  {card.card_name}
+                </h3>
+                {card.__engine === 'smart' && (
+                  <span
+                    className="text-[10px] font-bold px-1.5 py-0.5 rounded-full flex-shrink-0"
+                    style={{ background: 'rgba(245,158,11,0.18)', color: '#fbbf24', border: '1px solid rgba(245,158,11,0.4)' }}
+                    title="Smart Scan (AI) resolved this card"
+                  >
+                    ✨ SMART
+                  </span>
+                )}
+              </div>
               <p className="text-text-secondary text-xs mb-1 leading-relaxed line-clamp-2">
                 {card.type_line}
               </p>

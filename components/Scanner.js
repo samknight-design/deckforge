@@ -282,12 +282,15 @@ export default function Scanner({
     prevFrameRef.current    = null;
     setScanning(true);
 
-    const finishWithCard = (card, rewards) => {
+    const finishWithCard = (card, rewards, engine) => {
       setScanCount((c) => c + 1);
       if (rewards) showReward(rewards);
+      // Tag the card with which engine resolved it, so the result sheet can
+      // show the "✨ Smart Scan" badge when Claude fired.
+      const tagged = { ...card, __engine: engine };
       if (quickScanRef.current && autoAddRef.current) {
         // Quick Scan: auto-add to the pre-selected deck (no confirm prompt).
-        return autoAddRef.current(card).then((added) => {
+        return autoAddRef.current(tagged).then((added) => {
           if (added) {
             setQuickScanCount((c) => c + 1);
             requireMotionRef.current = true;
@@ -297,7 +300,7 @@ export default function Scanner({
           }
         });
       }
-      setResult(card);
+      setResult(tagged);
       if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
       updateScanState('idle');
       return Promise.resolve();
@@ -316,7 +319,7 @@ export default function Scanner({
           });
           const data = await res.json();
           if (res.ok && data.card) {
-            await finishWithCard(data.card, data.rewards);
+            await finishWithCard(data.card, data.rewards, data.engine || 'visual');
             return;
           }
           // Resolve failed — fall through to Claude.
@@ -331,7 +334,7 @@ export default function Scanner({
       const res  = await fetch('/api/scan', { method: 'POST', body: formData });
       const data = await res.json();
       if (res.ok && data.card) {
-        await finishWithCard(data.card, data.rewards);
+        await finishWithCard(data.card, data.rewards, data.engine || 'smart');
       } else {
         showToast(data.error || 'Card not recognized — try repositioning', 'error');
         startCooldown();

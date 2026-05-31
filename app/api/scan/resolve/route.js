@@ -38,6 +38,7 @@ export async function POST(request) {
     const rewards = await recordEvent(serviceClient, user.id, 'scan');
 
     return NextResponse.json({
+      engine: 'visual',
       card: {
         scryfall_id: card.scryfall_id,
         card_name: card.card_name,
