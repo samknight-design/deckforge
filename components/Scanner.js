@@ -7,7 +7,7 @@ import { showToast } from './Toast';
 import { showReward } from './RewardToast';
 import { formatEurTotal } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
-import { loadMatchDb, matchCard, matchDbInfo, previewCardCrop } from '@/lib/cardMatch';
+import { loadMatchDb, matchCard, matchDbInfo, previewCardCrop, hashImageElement, hammingHex } from '@/lib/cardMatch';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -229,6 +229,25 @@ export default function Scanner({
       const info = matchDbInfo();
       if (!last) setBenchResult({ error: 'No match (camera not ready?)' });
       else setBenchResult({ ...last, median: times[Math.floor(times.length / 2)] || last.ms, preview, dbCount: info?.n });
+    } catch (e) {
+      setBenchResult({ error: String(e?.message || e) });
+    } finally {
+      setBenchRunning(false);
+    }
+  }, []);
+
+  // Phase H0 pipeline self-test: hash a bundled reference image in-browser and
+  // compare to its stored hash. Distance ≈ 0 ⇒ reference⇄camera pipelines agree.
+  const runSelfTest = useCallback(async () => {
+    setBenchRunning(true);
+    setBenchResult(null);
+    try {
+      const meta = await (await fetch('/test-card.json')).json();
+      const img = new Image();
+      img.src = '/test-card.jpg';
+      await img.decode();
+      const bytes = hashImageElement(img);
+      setBenchResult({ parity: hammingHex(bytes, meta.hash), parityName: meta.name, totalBits: bytes.length * 8 });
     } catch (e) {
       setBenchResult({ error: String(e?.message || e) });
     } finally {
@@ -831,6 +850,18 @@ export default function Scanner({
                   >
                     {benchResult.error ? (
                       <p className="text-xs" style={{ color: '#f87171' }}>Match error: {benchResult.error}</p>
+                    ) : benchResult.parity !== undefined ? (
+                      <>
+                        <p className="text-base font-bold" style={{ color: benchResult.parity <= 8 ? '#10b981' : benchResult.parity <= 24 ? '#f59e0b' : '#f87171' }}>
+                          Pipeline self-test
+                        </p>
+                        <p className="text-sm mt-1" style={{ color: '#f1f5f9' }}>
+                          distance {benchResult.parity}/{benchResult.totalBits}
+                        </p>
+                        <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>
+                          {benchResult.parity === 0 ? 'perfect parity ✓' : benchResult.parity <= 8 ? 'pipelines agree' : 'pipelines DRIFT — bug'} · {benchResult.parityName}
+                        </p>
+                      </>
                     ) : (() => {
                       const total = benchResult.totalBits || 256;
                       const matchPct = Math.round((1 - benchResult.distance / total) * 100);
@@ -863,14 +894,24 @@ export default function Scanner({
                     })()}
                   </div>
                 )}
-                <button
-                  onPointerDown={runBench}
-                  disabled={benchRunning || !cameraReady}
-                  className="rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
-                  style={{ background: 'rgba(124,58,237,0.9)', color: '#fff', border: '1px solid #a78bfa' }}
-                >
-                  {benchRunning ? 'Matching…' : '🎯 Match test (LotR DB)'}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onPointerDown={runBench}
+                    disabled={benchRunning || !cameraReady}
+                    className="rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                    style={{ background: 'rgba(124,58,237,0.9)', color: '#fff', border: '1px solid #a78bfa' }}
+                  >
+                    {benchRunning ? 'Matching…' : '🎯 Match test'}
+                  </button>
+                  <button
+                    onPointerDown={runSelfTest}
+                    disabled={benchRunning}
+                    className="rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                    style={{ background: 'rgba(17,24,39,0.92)', color: '#c4b5fd', border: '1px solid #a78bfa' }}
+                  >
+                    🧪 Self-test
+                  </button>
+                </div>
               </div>
 
               {/* Bottom controls */}
