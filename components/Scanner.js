@@ -7,7 +7,7 @@ import { showToast } from './Toast';
 import { showReward } from './RewardToast';
 import { formatEurTotal } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
-import { loadMatchDb, matchCard, matchDbInfo, previewCardCrop, hashImageElement, hammingHex } from '@/lib/cardMatch';
+import { loadMatchDb, matchCardVoted, matchDbInfo, previewCardCrop, hashImageElement, hammingHex } from '@/lib/cardMatch';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -218,17 +218,11 @@ export default function Scanner({
     setBenchResult(null);
     try {
       await loadMatchDb('/hashes/ltr.json');
-      const times = [];
-      let last = null;
-      for (let i = 0; i < 5; i++) {
-        last = matchCard(videoRef.current, { vfW: 232, vfH: 324 });
-        if (last) times.push(last.ms);
-      }
-      times.sort((a, b) => a - b);
+      const last = await matchCardVoted(videoRef.current, { vfW: 232, vfH: 324 }, 5);
       const preview = previewCardCrop(videoRef.current, { vfW: 232, vfH: 324 });
       const info = matchDbInfo();
       if (!last) setBenchResult({ error: 'No match (camera not ready?)' });
-      else setBenchResult({ ...last, median: times[Math.floor(times.length / 2)] || last.ms, preview, dbCount: info?.n });
+      else setBenchResult({ ...last, median: last.ms, preview, dbCount: info?.n });
     } catch (e) {
       setBenchResult({ error: String(e?.message || e) });
     } finally {
@@ -876,6 +870,9 @@ export default function Scanner({
                           </p>
                           <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>
                             {benchResult.set?.toUpperCase()} #{benchResult.cn} · match {matchPct}% · gap {gapPct}%
+                          </p>
+                          <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
+                            votes {benchResult.votes}/{benchResult.frames} · {benchResult.detected ? '✓ card detected' : '✗ no detect (viewfinder)'}
                           </p>
                           <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
                             dist {benchResult.distance}/{total} · {benchResult.median}ms · DB {benchResult.dbCount}
