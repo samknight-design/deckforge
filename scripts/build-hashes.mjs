@@ -22,30 +22,50 @@ const HEADERS = {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// dHash — MUST stay byte-identical to lib/cardMatch.js: greyscale via Rec.601,
-// resize to (size+1)×size, compare horizontally adjacent pixels, pack MSB-first.
-function dhashFromImage(img, size = HASH_SIZE) {
-  const w = size + 1, h = size;
-  const canvas = createCanvas(w, h);
-  const ctx = canvas.getContext('2d');
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, 0, 0, w, h);
-  const d = ctx.getImageData(0, 0, w, h).data;
-  const out = new Uint8Array((size * h) / 8);
+// Deterministic dHash — MUST stay byte-identical to lib/cardMatch.js: box-average
+// the full-res image down to a (size+1)×size greyscale grid in plain JS (no engine
+// resampling), Rec.601 luma, compare horizontally adjacent cells, pack MSB-first.
+function dhashFromImageData(data, sw, sh, size = HASH_SIZE) {
+  const gw = size + 1, gh = size;
+  const grid = new Float64Array(gw * gh);
+  for (let gy = 0; gy < gh; gy++) {
+    const y0 = Math.floor((gy * sh) / gh);
+    const y1 = Math.max(y0 + 1, Math.floor(((gy + 1) * sh) / gh));
+    for (let gx = 0; gx < gw; gx++) {
+      const x0 = Math.floor((gx * sw) / gw);
+      const x1 = Math.max(x0 + 1, Math.floor(((gx + 1) * sw) / gw));
+      let sum = 0, cnt = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const i = (y * sw + x) * 4;
+          sum += data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+          cnt++;
+        }
+      }
+      grid[gy * gw + gx] = cnt ? sum / cnt : 0;
+    }
+  }
+  const out = new Uint8Array((size * size) / 8);
   let bit = 0;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = (y * w + x) * 4, i2 = (y * w + x + 1) * 4;
-      const g1 = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-      const g2 = d[i2] * 0.299 + d[i2 + 1] * 0.587 + d[i2 + 2] * 0.114;
-      if (g1 < g2) out[bit >> 3] |= (0x80 >> (bit & 7));
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < size; gx++) {
+      if (grid[gy * gw + gx] < grid[gy * gw + gx + 1]) out[bit >> 3] |= (0x80 >> (bit & 7));
       bit++;
     }
   }
   let hex = '';
   for (const b of out) hex += b.toString(16).padStart(2, '0');
   return hex;
+}
+
+function dhashFromImage(img, size = HASH_SIZE) {
+  const W = img.width, H = img.height;
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(img, 0, 0);
+  const { data } = ctx.getImageData(0, 0, W, H);
+  return dhashFromImageData(data, W, H, size);
 }
 
 function imageUrl(card) {
