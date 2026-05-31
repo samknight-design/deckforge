@@ -860,19 +860,17 @@ export default function Scanner({
                       const total = benchResult.totalBits || 256;
                       const matchPct = Math.round((1 - benchResult.distance / total) * 100);
                       const gapPct = Math.round(((benchResult.runnerUp - benchResult.distance) / total) * 100);
-                      const strong = benchResult.distance <= total * 0.20 && (benchResult.runnerUp - benchResult.distance) >= total * 0.05;
-                      const ok = benchResult.distance <= total * 0.28;
-                      const color = strong ? '#10b981' : ok ? '#f59e0b' : '#f87171';
+                      const color = benchResult.confident ? '#10b981' : '#f59e0b';
                       return (
                         <>
                           <p className="text-base font-bold" style={{ color }}>
-                            {benchResult.name || '(no match)'}
+                            {benchResult.name || '(no match)'} {benchResult.confident ? '' : ' · uncertain'}
                           </p>
                           <p className="text-xs mt-0.5" style={{ color: '#94a3b8' }}>
                             {benchResult.set?.toUpperCase()} #{benchResult.cn} · match {matchPct}% · gap {gapPct}%
                           </p>
                           <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
-                            votes {benchResult.votes}/{benchResult.frames} · {benchResult.detected ? '✓ card detected' : '✗ no detect (viewfinder)'}
+                            votes {benchResult.votes}/{benchResult.frames} · {benchResult.detected ? '✓ card detected' : '✗ no detect'} · {benchResult.confident ? 'CONFIDENT ✓' : 'fallback → Claude'}
                           </p>
                           <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
                             dist {benchResult.distance}/{total} · {benchResult.median}ms · DB {benchResult.dbCount}
