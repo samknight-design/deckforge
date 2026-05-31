@@ -7,7 +7,7 @@ import { showToast } from './Toast';
 import { showReward } from './RewardToast';
 import { formatEurTotal } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
-import { loadMatchDb, matchCardVoted, matchDbInfo, previewCardCrop, hashImageElement, hammingHex } from '@/lib/cardMatch';
+import { loadMatchDb, matchCardVoted, matchDbInfo, previewCardCrop, hashImageElement, hammingHex, warmCv } from '@/lib/cardMatch';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -205,9 +205,13 @@ export default function Scanner({
     return () => stopCamera();
   }, [mode, isOnline, startCamera, stopCamera]);
 
-  // Preload the hash DB when entering Scan mode so the first match is instant.
+  // Preload the hash DB and warm opencv.js when entering Scan mode so the first
+  // match isn't paying load cost (opencv is ~7–8 MB WASM — load it once, lazily).
   useEffect(() => {
-    if (mode === 'Scan' && cameraReady) loadMatchDb('/hashes/ltr.json').catch(() => {});
+    if (mode === 'Scan' && cameraReady) {
+      loadMatchDb('/hashes/ltr.json').catch(() => {});
+      warmCv().catch(() => {});
+    }
   }, [mode, cameraReady]);
 
   // Phase H0 benchmark: visually match the framed card against the hash DB and
@@ -218,8 +222,9 @@ export default function Scanner({
     setBenchResult(null);
     try {
       await loadMatchDb('/hashes/ltr.json');
+      await warmCv();
       const last = await matchCardVoted(videoRef.current, { vfW: 232, vfH: 324 }, 5);
-      const preview = previewCardCrop(videoRef.current, { vfW: 232, vfH: 324 });
+      const preview = await previewCardCrop(videoRef.current, { vfW: 232, vfH: 324 });
       const info = matchDbInfo();
       if (!last) setBenchResult({ error: 'No match (camera not ready?)' });
       else setBenchResult({ ...last, median: last.ms, preview, dbCount: info?.n });
