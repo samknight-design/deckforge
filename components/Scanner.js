@@ -7,7 +7,7 @@ import { showToast } from './Toast';
 import { showReward } from './RewardToast';
 import { formatEurTotal } from '@/lib/currency';
 import { getCurrency } from '@/lib/prefs';
-import { loadMatchDb, matchCardVoted, matchDbInfo, previewCardCrop, hashImageElement, hammingHex, warmCv, cvStatus } from '@/lib/cardMatch';
+import { loadMatchDb, matchCardVoted, matchDbInfo, previewCardCrop, hashImageElement, hammingHex } from '@/lib/cardMatch';
 import CardResultSheet from './CardResultSheet';
 
 const MODES = ['Scan', 'Search'];
@@ -222,21 +222,12 @@ export default function Scanner({
     setBenchRunning(true);
     setBenchResult(null);
     try {
-      // Hard 10s timeout so the button can NEVER stay stuck. If the match
-      // takes longer than that something has gone wrong (opencv hung, etc.) —
-      // we just report it and the user can try again.
-      const result = await Promise.race([
-        (async () => {
-          await loadMatchDb('/hashes/ltr.json');
-          const last = await matchCardVoted(videoRef.current, { vfW: 232, vfH: 324 }, 5);
-          const preview = await previewCardCrop(videoRef.current, { vfW: 232, vfH: 324 });
-          const info = matchDbInfo();
-          if (!last) return { error: 'No match (camera not ready?)' };
-          return { ...last, median: last.ms, preview, dbCount: info?.n, cv: cvStatus() };
-        })(),
-        new Promise((resolve) => setTimeout(() => resolve({ error: 'Timeout — opencv may be slow loading. Try again.' }), 10000)),
-      ]);
-      setBenchResult(result);
+      await loadMatchDb('/hashes/ltr.json');
+      const last = await matchCardVoted(videoRef.current, { vfW: 232, vfH: 324 }, 5);
+      const preview = previewCardCrop(videoRef.current, { vfW: 232, vfH: 324 });
+      const info = matchDbInfo();
+      if (!last) setBenchResult({ error: 'No match (camera not ready?)' });
+      else setBenchResult({ ...last, median: last.ms, preview, dbCount: info?.n });
     } catch (e) {
       setBenchResult({ error: String(e?.message || e) });
     } finally {
@@ -858,8 +849,6 @@ export default function Scanner({
                   >
                     {benchResult.error ? (
                       <p className="text-xs" style={{ color: '#f87171' }}>Match error: {benchResult.error}</p>
-                    ) : benchResult.info ? (
-                      <p className="text-xs" style={{ color: '#94a3b8' }}>{benchResult.info}</p>
                     ) : benchResult.parity !== undefined ? (
                       <>
                         <p className="text-base font-bold" style={{ color: benchResult.parity <= 8 ? '#10b981' : benchResult.parity <= 24 ? '#f59e0b' : '#f87171' }}>
@@ -888,9 +877,6 @@ export default function Scanner({
                           <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
                             votes {benchResult.votes}/{benchResult.frames} · {benchResult.detected ? '✓ card detected' : '✗ no detect'} · {benchResult.confident ? 'CONFIDENT ✓' : 'fallback → Claude'}
                           </p>
-                          <p className="text-xs mt-0.5" style={{ color: '#475569' }}>
-                            engine: {benchResult.engine || 'unknown'} · cv: {benchResult.cv || 'unknown'}
-                          </p>
                           <p className="text-xs mt-0.5" style={{ color: '#64748b' }}>
                             dist {benchResult.distance}/{total} · {benchResult.median}ms · DB {benchResult.dbCount}
                           </p>
@@ -908,7 +894,7 @@ export default function Scanner({
                     })()}
                   </div>
                 )}
-                <div className="flex gap-2 flex-wrap justify-center">
+                <div className="flex gap-2">
                   <button
                     onPointerDown={runBench}
                     disabled={benchRunning || !cameraReady}
@@ -924,14 +910,6 @@ export default function Scanner({
                     style={{ background: 'rgba(17,24,39,0.92)', color: '#c4b5fd', border: '1px solid #a78bfa' }}
                   >
                     🧪 Self-test
-                  </button>
-                  <button
-                    onPointerDown={() => { warmCv(); setBenchResult({ info: 'Loading opencv… (this may take 10s on slow connections). Try Match test again in a few seconds.' }); }}
-                    disabled={benchRunning}
-                    className="rounded-full px-4 py-2 text-xs font-semibold disabled:opacity-50"
-                    style={{ background: 'rgba(17,24,39,0.92)', color: '#94a3b8', border: '1px solid #1e2d47' }}
-                  >
-                    ⚙️ Try HQ detect
                   </button>
                 </div>
               </div>
