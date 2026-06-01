@@ -1,17 +1,29 @@
-# dependencies
-/node_modules
-/.pnp
+# dependencies (path-agnostic for the workspaces under web/ + mobile/)
+node_modules/
+.pnp
 .pnp.js
 
 # testing
-/coverage
+coverage/
 
 # next.js
-/.next/
-/out/
+.next/
+out/
 
 # production
-/build
+build/
+
+# expo (mobile/)
+.expo/
+.expo-shared/
+dist/
+android/build/
+ios/build/
+ios/Pods/
+ios/DerivedData/
+*.ipa
+*.apk
+*.aab
 
 # misc
 .DS_Store
