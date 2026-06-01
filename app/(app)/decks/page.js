@@ -1,21 +1,19 @@
-import { createClient } from '@/lib/supabase/server';
+'use client';
+
+import { useInitialData, LoadingScreen } from '@/lib/useInitialData';
 import DeckListPage from '@/components/DeckListPage';
 
-export default async function DecksPage() {
-  const supabase = createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-
-  const { data: decks } = await supabase
-    .from('decks')
-    .select('*')
-    .eq('user_id', user.id)
-    .order('updated_at', { ascending: false });
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('tier')
-    .eq('id', user.id)
-    .single();
-
-  return <DeckListPage decks={decks || []} tier={profile?.tier || 'free'} userId={user.id} />;
+export default function DecksPage() {
+  const { loading, data, user } = useInitialData(async (supabase, user) => {
+    const [decksResult, profileResult] = await Promise.all([
+      supabase.from('decks').select('*').eq('user_id', user.id).order('updated_at', { ascending: false }),
+      supabase.from('profiles').select('tier').eq('id', user.id).single(),
+    ]);
+    return {
+      decks: decksResult.data || [],
+      tier: profileResult.data?.tier || 'free',
+    };
+  });
+  if (loading || !data) return <LoadingScreen />;
+  return <DeckListPage decks={data.decks} tier={data.tier} userId={user.id} />;
 }
