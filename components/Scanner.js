@@ -318,7 +318,7 @@ export default function Scanner({
         const match = await matchCardVoted(videoRef.current, { vfW: 232, vfH: 324 });
         // Diagnostic: log what visual matching saw so it's visible in DevTools.
         // eslint-disable-next-line no-console
-        console.log('[scan] visual match:', match ? { name: match.name, distance: match.distance, runnerUp: match.runnerUp, gap: match.runnerUp - match.distance, confident: match.confident, detected: match.detected } : null);
+        console.log('[scan] visual match:', match ? { name: match.name, distance: match.distance, runnerUp: match.runnerUp, gap: match.runnerUp - match.distance, confident: match.confident, detected: match.detected, path: match.path } : null);
         if (match?.confident && match.id) {
           const res = await fetch('/api/scan/resolve', {
             method: 'POST',
