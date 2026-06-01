@@ -46,6 +46,22 @@ export default function RootLayout({ children }) {
                   });
                 });
               }
+              // Mobile DevTools shim — opt-in via ?debug=1 in the URL.
+              // Loads Eruda from a CDN, mounts the on-screen console drawer,
+              // and persists across navigation in the same session.
+              (function() {
+                try {
+                  var url = new URL(window.location.href);
+                  var want = url.searchParams.get('debug') === '1';
+                  if (want) sessionStorage.setItem('df_debug', '1');
+                  if (sessionStorage.getItem('df_debug') === '1') {
+                    var s = document.createElement('script');
+                    s.src = 'https://cdn.jsdelivr.net/npm/eruda';
+                    s.onload = function() { try { window.eruda && window.eruda.init(); } catch (e) {} };
+                    document.head.appendChild(s);
+                  }
+                } catch (e) {}
+              })();
             `,
           }}
         />
