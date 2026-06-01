@@ -1,0 +1,13 @@
+{
+  "name": "@deckforge/shared",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pure-JS modules shared between web (Next.js PWA) and mobile (Expo React Native). No DOM, no Next.js, no React Native — just data + helpers.",
+  "type": "module",
+  "exports": {
+    "./tiers": "./tiers.js",
+    "./brackets": "./brackets.js",
+    "./currency": "./currency.js",
+    "./deckUtils": "./deckUtils.js"
+  }
+}
