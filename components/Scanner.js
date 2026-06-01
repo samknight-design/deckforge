@@ -584,8 +584,8 @@ export default function Scanner({
     scanState === 'scanning' ? 'Identifying card…' :
     scanState === 'stable'   ? 'Hold still…' :
     scanState === 'cooldown' ? (quickScan ? 'Added · swap in the next card' : 'Trying again shortly…') :
-    quickScan                ? 'Auto-scanning · fit the whole card in frame' :
-    'Fit the whole card in frame · tap to scan';
+    quickScan                ? 'Auto-scanning · fit the card inside the box' :
+    'Fit the card inside the box · tap to scan';
 
   const vfTextColor =
     scanState === 'scanning' ? '#f59e0b' :

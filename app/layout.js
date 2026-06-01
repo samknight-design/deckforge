@@ -55,6 +55,7 @@ export default function RootLayout({ children }) {
                   var want = url.searchParams.get('debug') === '1';
                   if (want) sessionStorage.setItem('df_debug', '1');
                   if (sessionStorage.getItem('df_debug') === '1') {
+                    window.__df_dbgWarp = true; // enable Hough debug logging
                     var s = document.createElement('script');
                     s.src = 'https://cdn.jsdelivr.net/npm/eruda';
                     s.onload = function() { try { window.eruda && window.eruda.init(); } catch (e) {} };
