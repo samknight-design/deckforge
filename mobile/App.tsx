@@ -7,10 +7,17 @@ import { useEffect, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Linking from 'expo-linking';
+import * as WebBrowser from 'expo-web-browser';
+import { makeRedirectUri } from 'expo-auth-session';
 import { supabase } from './lib/supabase';
 import { TIERS } from '@deckforge/shared/tiers';
 import type { Session } from '@supabase/supabase-js';
 import ScanScreen from './screens/ScanScreen';
+
+// Required for the in-app browser session to dismiss correctly when the
+// OAuth provider redirects back to us. Calling this once at module scope is
+// the documented pattern; safe to call even if there's no pending session.
+WebBrowser.maybeCompleteAuthSession();
 
 // Tiny route enum — replaces a real navigator until Phase RN3 brings in
 // expo-router. We only have two signed-in screens (home + scan) so a single
@@ -77,6 +84,41 @@ export default function App() {
     if (error) Alert.alert('Sign-in failed', error.message);
   };
 
+  // Google OAuth via PKCE:
+  //   1. Ask Supabase for the Google authorize URL with skipBrowserRedirect.
+  //   2. Open it in a system in-app browser (SFAuthenticationSession on iOS /
+  //      Custom Tabs on Android) via WebBrowser.openAuthSessionAsync.
+  //   3. After Google → Supabase → our redirectTo, the browser closes and
+  //      returns the redirect URL.
+  //   4. Parse out ?code= and exchange it for a session.
+  const signInWithGoogle = async () => {
+    setBusy(true);
+    try {
+      const redirectTo = makeRedirectUri();
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo, skipBrowserRedirect: true },
+      });
+      if (error) throw error;
+      if (!data?.url) throw new Error('No OAuth URL returned from Supabase');
+
+      const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
+      if (result.type !== 'success' || !result.url) {
+        // User cancelled — no error, just nothing happens.
+        return;
+      }
+      const parsed = Linking.parse(result.url);
+      const code = parsed.queryParams?.code as string | undefined;
+      if (!code) throw new Error('No `code` in OAuth redirect URL');
+      const { error: exErr } = await supabase.auth.exchangeCodeForSession(code);
+      if (exErr) throw exErr;
+    } catch (e: any) {
+      Alert.alert('Google sign-in failed', e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const signOut = async () => {
     setBusy(true);
     await supabase.auth.signOut();
@@ -118,6 +160,18 @@ export default function App() {
           onChangeText={setPassword}
           editable={!busy}
         />
+        <Pressable
+          style={({ pressed }) => [styles.google, (pressed || busy) && { opacity: 0.6 }]}
+          onPress={signInWithGoogle}
+          disabled={busy}
+        >
+          <Text style={styles.googleText}>🔵 Continue with Google</Text>
+        </Pressable>
+        <View style={styles.divider}>
+          <View style={styles.dividerLine} />
+          <Text style={styles.dividerText}>or with email</Text>
+          <View style={styles.dividerLine} />
+        </View>
         <Pressable
           style={({ pressed }) => [styles.primary, (pressed || busy) && { opacity: 0.6 }]}
           onPress={sendMagicLink}
@@ -215,4 +269,23 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   secondaryText: { color: '#94a3b8', fontSize: 14, fontWeight: '500' },
+  google: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#fff',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  googleText: { color: '#0a0e1a', fontSize: 14, fontWeight: '600' },
+  divider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: 360,
+    marginVertical: 12,
+  },
+  dividerLine: { flex: 1, height: 1, backgroundColor: '#1e2d47' },
+  dividerText: { color: '#64748b', fontSize: 11, paddingHorizontal: 12 },
 });
