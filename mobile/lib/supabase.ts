@@ -23,6 +23,11 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   );
 }
 
+// Temporary diagnostic: prints in the Metro terminal so we can confirm the
+// env file is being read and the URL looks right. Remove once auth works.
+// eslint-disable-next-line no-console
+console.log('[supabase] URL =', SUPABASE_URL, '| anon key length =', SUPABASE_ANON_KEY.length);
+
 // SecureStore-backed storage adapter for Supabase auth. Supabase reads/writes
 // the session object as a JSON string under one key; SecureStore handles the
 // encrypted persistence. Token refresh, sign-out, etc. all flow through here.
