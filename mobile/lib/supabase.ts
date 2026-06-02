@@ -26,14 +26,6 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   );
 }
 
-// Temporary diagnostic: char-by-char dump of the URL so we can see whitespace
-// or hidden characters. Anon key prints length + first/last 4 chars. Remove
-// once auth works.
-// eslint-disable-next-line no-console
-console.log('[supabase] URL length:', SUPABASE_URL.length, '| URL chars:', JSON.stringify(SUPABASE_URL));
-// eslint-disable-next-line no-console
-console.log('[supabase] anon key length:', SUPABASE_ANON_KEY.length, '| starts:', SUPABASE_ANON_KEY.slice(0, 4), '| ends:', SUPABASE_ANON_KEY.slice(-4));
-
 // SecureStore-backed storage adapter for Supabase auth. Supabase reads/writes
 // the session object as a JSON string under one key; SecureStore handles the
 // encrypted persistence. Token refresh, sign-out, etc. all flow through here.
