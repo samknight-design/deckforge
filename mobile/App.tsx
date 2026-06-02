@@ -10,6 +10,12 @@ import * as Linking from 'expo-linking';
 import { supabase } from './lib/supabase';
 import { TIERS } from '@deckforge/shared/tiers';
 import type { Session } from '@supabase/supabase-js';
+import ScanScreen from './screens/ScanScreen';
+
+// Tiny route enum — replaces a real navigator until Phase RN3 brings in
+// expo-router. We only have two signed-in screens (home + scan) so a single
+// useState bit is enough.
+type Route = 'home' | 'scan';
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -17,6 +23,7 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
+  const [route, setRoute] = useState<Route>('home');
 
   // Auth boot: read whatever session exists in SecureStore, subscribe to changes.
   useEffect(() => {
@@ -130,6 +137,10 @@ export default function App() {
     );
   }
 
+  if (route === 'scan') {
+    return <ScanScreen onBack={() => setRoute('home')} />;
+  }
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>⚔️ DeckForge</Text>
@@ -139,6 +150,13 @@ export default function App() {
       <Text style={styles.meta}>
         Loaded {Object.keys(TIERS).length} tiers from @deckforge/shared
       </Text>
+      <Pressable
+        style={({ pressed }) => [styles.primary, (pressed || busy) && { opacity: 0.6 }]}
+        onPress={() => setRoute('scan')}
+        disabled={busy}
+      >
+        <Text style={styles.primaryText}>📷 Scan a card</Text>
+      </Pressable>
       <Pressable
         style={({ pressed }) => [styles.secondary, (pressed || busy) && { opacity: 0.6 }]}
         onPress={signOut}
