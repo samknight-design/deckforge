@@ -12,8 +12,11 @@ import 'react-native-url-polyfill/auto'; // Supabase JS uses URL/URLSearchParams
 import { createClient } from '@supabase/supabase-js';
 import * as SecureStore from 'expo-secure-store';
 
-const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+// .trim() defensively — copy-paste from Notepad / VS Code sometimes drags a
+// trailing newline that breaks URL concatenation when the SDK builds e.g.
+// `${URL}/auth/v1/otp`. Cheap insurance, harmless on clean values.
+const SUPABASE_URL = (process.env.EXPO_PUBLIC_SUPABASE_URL || '').trim();
+const SUPABASE_ANON_KEY = (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '').trim();
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   // Fail loudly rather than silently mis-routing requests at runtime.
@@ -23,10 +26,13 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   );
 }
 
-// Temporary diagnostic: prints in the Metro terminal so we can confirm the
-// env file is being read and the URL looks right. Remove once auth works.
+// Temporary diagnostic: char-by-char dump of the URL so we can see whitespace
+// or hidden characters. Anon key prints length + first/last 4 chars. Remove
+// once auth works.
 // eslint-disable-next-line no-console
-console.log('[supabase] URL =', SUPABASE_URL, '| anon key length =', SUPABASE_ANON_KEY.length);
+console.log('[supabase] URL length:', SUPABASE_URL.length, '| URL chars:', JSON.stringify(SUPABASE_URL));
+// eslint-disable-next-line no-console
+console.log('[supabase] anon key length:', SUPABASE_ANON_KEY.length, '| starts:', SUPABASE_ANON_KEY.slice(0, 4), '| ends:', SUPABASE_ANON_KEY.slice(-4));
 
 // SecureStore-backed storage adapter for Supabase auth. Supabase reads/writes
 // the session object as a JSON string under one key; SecureStore handles the

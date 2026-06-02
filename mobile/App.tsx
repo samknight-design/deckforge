@@ -76,6 +76,34 @@ export default function App() {
     setBusy(false);
   };
 
+  // Phase RN1 diagnostic: hit Supabase's OTP endpoint with a plain fetch,
+  // bypassing the SDK. If THIS works but signInWithOtp doesn't, the bug is
+  // in the SDK's request construction. If this also fails, it's a deeper
+  // RN networking issue. Remove once auth verified working.
+  const testRawFetch = async () => {
+    if (!email.trim()) { Alert.alert('Email required'); return; }
+    setBusy(true);
+    try {
+      const url = (process.env.EXPO_PUBLIC_SUPABASE_URL || '').trim() + '/auth/v1/otp';
+      const anon = (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '').trim();
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: anon,
+          Authorization: `Bearer ${anon}`,
+        },
+        body: JSON.stringify({ email: email.trim(), create_user: true }),
+      });
+      const text = await res.text();
+      Alert.alert(`Raw fetch ${res.status}`, text.slice(0, 500));
+    } catch (e: any) {
+      Alert.alert('Raw fetch threw', `${e?.name ?? 'Error'}: ${e?.message ?? String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!bootstrapped) {
     return (
       <View style={styles.container}>
@@ -124,6 +152,13 @@ export default function App() {
           disabled={busy}
         >
           <Text style={styles.secondaryText}>Sign in with password</Text>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [styles.secondary, (pressed || busy) && { opacity: 0.6 }]}
+          onPress={testRawFetch}
+          disabled={busy}
+        >
+          <Text style={styles.secondaryText}>🧪 Test raw fetch (diagnostic)</Text>
         </Pressable>
         <StatusBar style="light" />
       </View>
