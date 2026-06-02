@@ -14,5 +14,10 @@
     "start": "npm --workspace=web run start",
     "lint": "npm --workspace=web run lint",
     "mobile:start": "npm --workspace=mobile run start"
+  },
+  "//comment": "React 18 is declared here at the root so npm hoists 18 (not mobile's 19) to the top of node_modules/. Web's Next 14 stack needs React 18; mobile's RN 0.81 needs React 19. Without this pin, mobile's 19 wins the hoist and any transitive package that does `require('react')` from root finds 19 — leading to the 'two Reacts' useContext crash during Next prerender. Mobile's React 19 still gets installed locally in mobile/node_modules.",
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   }
 }
