@@ -4,7 +4,6 @@
     "appVersionSource": "remote"
   },
   "build": {
-    "//comment": "Three build profiles. `development` builds a dev client (an Expo Go-like app that includes our custom native modules, like vision-camera). `preview` builds an APK/IPA for internal testing (no dev server). `production` is what we submit to the stores.",
     "development": {
       "developmentClient": true,
       "distribution": "internal",
