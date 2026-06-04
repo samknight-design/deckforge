@@ -10,10 +10,16 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "app.deckforge"
+      "bundleIdentifier": "app.deckforge",
+      "infoPlist": {
+        "NSCameraUsageDescription": "DeckForge uses your camera to scan Magic: The Gathering cards. Images stay on your device unless you tap to Smart-Scan a card we can't identify locally."
+      }
     },
     "android": {
       "package": "app.deckforge",
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#0a0e1a",
         "foregroundImage": "./assets/android-icon-foreground.png",
