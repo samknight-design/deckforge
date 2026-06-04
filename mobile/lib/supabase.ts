@@ -49,5 +49,11 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     // RN has no built-in URL bar; we handle redirect callbacks via expo-linking,
     // not URL detection.
     detectSessionInUrl: false,
+    // PKCE — modern, secure OAuth flow that returns an exchangeable `?code=`
+    // in the redirect URL's query string. Without this, Supabase defaults to
+    // the implicit grant flow which puts tokens in the URL hash fragment
+    // (`#access_token=...`), and our App.tsx parses queryParams.code so the
+    // sign-in would silently fail with "No `code` in OAuth redirect URL".
+    flowType: 'pkce',
   },
 });

@@ -107,9 +107,14 @@ export default function App() {
         // User cancelled — no error, just nothing happens.
         return;
       }
+      // Diagnostic: print the raw redirect URL on failure paths. Safe to log
+      // briefly — the code is single-use and our anon key is already shipped.
+      // Remove once Google auth verified working.
+      // eslint-disable-next-line no-console
+      console.log('[oauth] redirect URL:', result.url);
       const parsed = Linking.parse(result.url);
       const code = parsed.queryParams?.code as string | undefined;
-      if (!code) throw new Error('No `code` in OAuth redirect URL');
+      if (!code) throw new Error(`No 'code' in OAuth redirect URL. Raw: ${result.url.slice(0, 200)}`);
       const { error: exErr } = await supabase.auth.exchangeCodeForSession(code);
       if (exErr) throw exErr;
     } catch (e: any) {
