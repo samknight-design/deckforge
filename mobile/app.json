@@ -24,13 +24,7 @@
     },
     "plugins": [
       "expo-secure-store",
-      "expo-web-browser",
-      [
-        "react-native-vision-camera",
-        {
-          "cameraPermissionText": "DeckForge uses your camera to scan Magic cards. Images stay on your device unless you tap to Smart-Scan a card we can't identify locally."
-        }
-      ]
+      "expo-web-browser"
     ],
     "extra": {
       "apiBaseUrl": "https://deckforge-eta.vercel.app"
