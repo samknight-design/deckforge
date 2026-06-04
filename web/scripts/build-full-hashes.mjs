@@ -20,6 +20,7 @@ import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { writeFile, mkdir, readFile, access } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const HASH_SIZE = 16;                   // 16×16 → 256-bit / 32-byte dHash
 const BYTES_PER_HASH = (HASH_SIZE * HASH_SIZE) / 8;
@@ -125,7 +126,13 @@ async function loadExisting(idxPath, binPath) {
 
 async function main() {
   const incremental = process.argv.includes('--incremental');
-  const outDir = path.join(process.cwd(), 'public', 'hashes');
+  // Output goes into mobile/assets/hashes/ so it bundles with the Expo app.
+  // Path is relative to this script's location (repo/web/scripts/) so the
+  // script can be invoked from anywhere — `node web/scripts/build-full-hashes.mjs`
+  // from the repo root works, as does `cd web && node scripts/...`.
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const outDir = path.resolve(scriptDir, '..', '..', 'mobile', 'assets', 'hashes');
+  console.log(`Output → ${outDir}`);
   await mkdir(outDir, { recursive: true });
   const binPath = path.join(outDir, 'cards.bin');
   const idxPath = path.join(outDir, 'cards.idx.json');
