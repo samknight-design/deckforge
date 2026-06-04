@@ -17,10 +17,14 @@
 // and the index can be loaded lazily / streamed.
 
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { writeFile, mkdir, readFile, access } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { writeFile, mkdir, readFile, access, unlink } from 'node:fs/promises';
+import { createWriteStream, createReadStream, existsSync } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import streamArray from 'stream-json/streamers/stream-array.js';
 
 const HASH_SIZE = 16;                   // 16×16 → 256-bit / 32-byte dHash
 const BYTES_PER_HASH = (HASH_SIZE * HASH_SIZE) / 8;
@@ -80,25 +84,47 @@ function imageUrl(card) {
   return uris?.small || uris?.normal || null;
 }
 
-async function fetchBulkData() {
+// Stream-load Scryfall's bulk default_cards file. The file is ~540 MB of JSON;
+// loading it into one string blows Node's v8 max-string-length (≈ 512 MB).
+// So: download to disk first, then stream-parse the top-level array element
+// by element via stream-json. Returns an async iterable of card objects.
+async function* streamBulkCards() {
   console.log('Fetching Scryfall bulk-data manifest…');
-  const res = await fetch(SCRYFALL_BULK, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } });
-  if (!res.ok) throw new Error(`bulk-data manifest ${res.status}`);
-  const data = await res.json();
-  const entry = data.data.find((e) => e.type === 'default_cards');
+  const manifestRes = await fetch(SCRYFALL_BULK, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } });
+  if (!manifestRes.ok) throw new Error(`bulk-data manifest ${manifestRes.status}`);
+  const manifest = await manifestRes.json();
+  const entry = manifest.data.find((e) => e.type === 'default_cards');
   if (!entry) throw new Error('no default_cards in bulk-data');
-  console.log(`Downloading default_cards (${(entry.size / 1e6).toFixed(0)} MB)…`);
+
+  const tmpFile = path.join(os.tmpdir(), `deckforge-bulk-${Date.now()}.json`);
+  console.log(`Downloading default_cards (${(entry.size / 1e6).toFixed(0)} MB) → ${tmpFile}`);
   const cardsRes = await fetch(entry.download_uri, { headers: { 'User-Agent': USER_AGENT } });
   if (!cardsRes.ok) throw new Error(`default_cards ${cardsRes.status}`);
-  return cardsRes.json();
+  if (!cardsRes.body) throw new Error('default_cards response has no body');
+  // Pipe HTTP body → disk
+  await pipeline(Readable.fromWeb(cardsRes.body), createWriteStream(tmpFile));
+  console.log('Download complete. Streaming parse…');
+
+  try {
+    // Stream-parse the top-level JSON array: each yielded value is a card object.
+    // withParserAsStream() returns a Node stream in object mode that emits
+    // { key, value } per array element.
+    const stream = createReadStream(tmpFile).pipe(streamArray.withParserAsStream());
+    for await (const { value } of stream) {
+      yield value;
+    }
+  } finally {
+    try { await unlink(tmpFile); } catch {}
+  }
 }
 
-async function hashOne(card) {
-  const u = imageUrl(card);
-  if (!u) return null;
+// `print` here is the slimmed record built by the streaming pass: { id, name,
+// set, cn, url }. Returns a Uint8Array of bytes or null on failure.
+async function hashOne(print) {
+  if (!print?.url) return null;
   for (let attempt = 0; attempt < RETRY; attempt++) {
     try {
-      const res = await fetch(u, { headers: { 'User-Agent': USER_AGENT } });
+      const res = await fetch(print.url, { headers: { 'User-Agent': USER_AGENT } });
       if (!res.ok) { await sleep(200); continue; }
       const buf = Buffer.from(await res.arrayBuffer());
       return await dhashFromBuffer(buf);
@@ -140,10 +166,19 @@ async function main() {
 
   const existing = incremental ? await loadExisting(idxPath, binPath) : null;
 
-  const allCards = await fetchBulkData();
-  // Keep one row per unique printing (id is the Scryfall print id).
-  const prints = allCards.filter((c) => imageUrl(c));
+  // Stream-collect every printing that has an image. The card objects from
+  // stream-json are full Scryfall card records, but we only keep what we need
+  // for hashing and the index — about ~150 bytes per card vs ~5 KB raw, so
+  // ~90k cards × 150 = 14 MB resident. Fine.
+  console.log('Pass 1/2: streaming card metadata…');
+  const prints = [];
+  for await (const card of streamBulkCards()) {
+    const u = imageUrl(card);
+    if (!u) continue;
+    prints.push({ id: card.id, name: card.name, set: card.set, cn: card.collector_number, url: u });
+  }
   console.log(`Total printings with images: ${prints.length}`);
+  console.log('Pass 2/2: fetching images + hashing in parallel batches…');
 
   const idx = new Array(prints.length);
   const hashes = new Array(prints.length);
@@ -156,7 +191,7 @@ async function main() {
     const batch = prints.slice(i, i + CONCURRENCY);
     const results = await Promise.all(batch.map(async (card, k) => {
       const slot = i + k;
-      idx[slot] = { id: card.id, name: card.name, set: card.set, cn: card.collector_number };
+      idx[slot] = { id: card.id, name: card.name, set: card.set, cn: card.cn };
       const reuse = existing?.get(card.id);
       if (reuse) { reused++; return reuse; }
       const h = await hashOne(card);

@@ -27,7 +27,11 @@
       "expo-web-browser"
     ],
     "extra": {
-      "apiBaseUrl": "https://deckforge-eta.vercel.app"
-    }
+      "apiBaseUrl": "https://deckforge-eta.vercel.app",
+      "eas": {
+        "projectId": "18abc667-8e81-47b3-b0b3-9980bc95741b"
+      }
+    },
+    "owner": "arcaneflame"
   }
 }
