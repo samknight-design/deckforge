@@ -25,6 +25,8 @@ import {
   useCameraPermission,
 } from 'react-native-vision-camera';
 import { apiFetch } from '../lib/api';
+import { addCardToDeck, type Deck } from '../lib/db';
+import DeckPickerSheet from '../components/DeckPickerSheet';
 
 type ScannedCard = {
   scryfall_id: string;
@@ -36,13 +38,49 @@ type ScannedCard = {
   price_eur?: number | null;
 };
 
-export default function CameraView({ onBack }: { onBack: () => void }) {
+export default function CameraView({
+  userId,
+  targetDeck,
+  onBack,
+}: {
+  userId: string;
+  targetDeck?: Deck | null;
+  onBack: () => void;
+}) {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
   const cameraRef = useRef<Camera>(null);
   const [requesting, setRequesting] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState<ScannedCard | null>(null);
+  const [isFoil, setIsFoil] = useState(false);
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [addedTo, setAddedTo] = useState<string | null>(null);
+
+  const reset = () => {
+    setResult(null);
+    setIsFoil(false);
+    setAddedTo(null);
+  };
+
+  const doAdd = async (deck: Deck) => {
+    if (!result) return;
+    try {
+      await addCardToDeck(deck.id, { scryfall_id: result.scryfall_id, card_name: result.card_name }, isFoil);
+      setAddedTo(deck.name);
+    } catch (e: unknown) {
+      Alert.alert('Could not add', e instanceof Error ? e.message : String(e));
+    } finally {
+      setPickerVisible(false);
+    }
+  };
+
+  // "Add to deck" tap: straight to the target deck if scanning into one,
+  // else open the deck picker.
+  const onAddPress = () => {
+    if (targetDeck) doAdd(targetDeck);
+    else setPickerVisible(true);
+  };
 
   // Auto-prompt for camera permission on first mount.
   useEffect(() => {
@@ -178,59 +216,80 @@ export default function CameraView({ onBack }: { onBack: () => void }) {
       )}
 
       {/* Result overlay */}
-      {result && <ResultOverlay card={result} onScanAnother={() => setResult(null)} onDone={onBack} />}
-    </View>
-  );
-}
-
-function ResultOverlay({
-  card,
-  onScanAnother,
-  onDone,
-}: {
-  card: ScannedCard;
-  onScanAnother: () => void;
-  onDone: () => void;
-}) {
-  return (
-    <View style={styles.resultBackdrop}>
-      <View style={styles.resultSheet}>
-        <Text style={styles.resultBadge}>✨ Smart Scan match</Text>
-        <View style={{ flexDirection: 'row', gap: 14, alignItems: 'flex-start' }}>
-          {card.image_uri ? (
-            <Image source={{ uri: card.image_uri }} style={styles.resultImage} />
-          ) : (
-            <View style={[styles.resultImage, { alignItems: 'center', justifyContent: 'center' }]}>
-              <Text style={{ fontSize: 30 }}>🃏</Text>
+      {result && (
+        <View style={styles.resultBackdrop}>
+          <View style={styles.resultSheet}>
+            <Text style={styles.resultBadge}>✨ Smart Scan match</Text>
+            <View style={{ flexDirection: 'row', gap: 14, alignItems: 'flex-start' }}>
+              {result.image_uri ? (
+                <Image source={{ uri: result.image_uri }} style={styles.resultImage} />
+              ) : (
+                <View style={[styles.resultImage, { alignItems: 'center', justifyContent: 'center' }]}>
+                  <Text style={{ fontSize: 30 }}>🃏</Text>
+                </View>
+              )}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.resultName}>{result.card_name}</Text>
+                {!!result.type_line && <Text style={styles.resultMeta}>{result.type_line}</Text>}
+                {!!result.set_name && (
+                  <Text style={styles.resultMeta}>
+                    {result.set_name}
+                    {result.set_code ? ` · ${result.set_code.toUpperCase()}` : ''}
+                  </Text>
+                )}
+                {result.price_eur != null && (
+                  <Text style={styles.resultPrice}>€{Number(result.price_eur).toFixed(2)}</Text>
+                )}
+              </View>
             </View>
-          )}
-          <View style={{ flex: 1 }}>
-            <Text style={styles.resultName}>{card.card_name}</Text>
-            {!!card.type_line && <Text style={styles.resultMeta}>{card.type_line}</Text>}
-            {!!card.set_name && (
-              <Text style={styles.resultMeta}>
-                {card.set_name}
-                {card.set_code ? ` · ${card.set_code.toUpperCase()}` : ''}
-              </Text>
-            )}
-            {card.price_eur != null && (
-              <Text style={styles.resultPrice}>€{Number(card.price_eur).toFixed(2)}</Text>
+
+            {addedTo ? (
+              <>
+                <Text style={styles.addedText}>✓ Added to {addedTo}</Text>
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                  <Pressable style={[styles.secondary, { flex: 1 }]} onPress={onBack}>
+                    <Text style={styles.secondaryText}>Done</Text>
+                  </Pressable>
+                  <Pressable style={[styles.primary, { flex: 2 }]} onPress={reset}>
+                    <Text style={styles.primaryText}>📷 Scan another</Text>
+                  </Pressable>
+                </View>
+              </>
+            ) : (
+              <>
+                {/* Foil toggle */}
+                <Pressable
+                  style={[styles.foilToggle, isFoil && styles.foilToggleActive]}
+                  onPress={() => setIsFoil((f) => !f)}
+                >
+                  <Text style={[styles.foilText, isFoil && { color: '#c4b5fd' }]}>✦ Foil</Text>
+                  <View style={[styles.switch, isFoil && { backgroundColor: '#7c3aed' }]}>
+                    <View style={[styles.knob, isFoil && { left: 20 }]} />
+                  </View>
+                </Pressable>
+
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                  <Pressable style={[styles.secondary, { flex: 1 }]} onPress={reset}>
+                    <Text style={styles.secondaryText}>Rescan</Text>
+                  </Pressable>
+                  <Pressable style={[styles.primary, { flex: 2 }]} onPress={onAddPress}>
+                    <Text style={styles.primaryText}>
+                      {targetDeck ? `+ Add to ${targetDeck.name}` : '+ Add to deck'}
+                    </Text>
+                  </Pressable>
+                </View>
+              </>
             )}
           </View>
         </View>
-        <Text style={styles.resultFootnote}>
-          &quot;Add to deck&quot; will appear once Phase RN3 ships the deck screens. For
-          now we just confirm the match.
-        </Text>
-        <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
-          <Pressable style={[styles.secondary, { flex: 1 }]} onPress={onDone}>
-            <Text style={styles.secondaryText}>Done</Text>
-          </Pressable>
-          <Pressable style={[styles.primary, { flex: 2 }]} onPress={onScanAnother}>
-            <Text style={styles.primaryText}>📷 Scan another</Text>
-          </Pressable>
-        </View>
-      </View>
+      )}
+
+      <DeckPickerSheet
+        userId={userId}
+        visible={pickerVisible}
+        onClose={() => setPickerVisible(false)}
+        onPick={doAdd}
+      />
     </View>
   );
 }
@@ -359,5 +418,21 @@ const styles = StyleSheet.create({
   resultName: { color: '#fff', fontWeight: '700', fontSize: 18, marginBottom: 4 },
   resultMeta: { color: '#94a3b8', fontSize: 12, marginBottom: 2 },
   resultPrice: { color: '#10b981', fontWeight: '700', marginTop: 6 },
-  resultFootnote: { color: '#64748b', fontSize: 11, marginTop: 14, lineHeight: 16 },
+  addedText: { color: '#10b981', fontWeight: '700', fontSize: 15, marginTop: 16 },
+  foilToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#1a2235',
+    borderColor: '#1e2d47',
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginTop: 16,
+  },
+  foilToggleActive: { borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.12)' },
+  foilText: { color: '#94a3b8', fontWeight: '500' },
+  switch: { width: 40, height: 22, borderRadius: 11, backgroundColor: '#334155', justifyContent: 'center' },
+  knob: { width: 18, height: 18, borderRadius: 9, backgroundColor: '#fff', position: 'absolute', left: 2 },
 });

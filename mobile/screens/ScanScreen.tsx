@@ -8,10 +8,19 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Constants from 'expo-constants';
+import type { Deck } from '../lib/db';
 
 const isExpoGo = Constants.appOwnership === 'expo';
 
-export default function ScanScreen({ onBack }: { onBack: () => void }) {
+export default function ScanScreen({
+  userId,
+  targetDeck,
+  onBack,
+}: {
+  userId: string;
+  targetDeck?: Deck | null;
+  onBack: () => void;
+}) {
   if (isExpoGo) {
     return (
       <View style={styles.container}>
@@ -38,7 +47,7 @@ export default function ScanScreen({ onBack }: { onBack: () => void }) {
   // when we know the native module is present.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const CameraView = require('./CameraView').default;
-  return <CameraView onBack={onBack} />;
+  return <CameraView userId={userId} targetDeck={targetDeck} onBack={onBack} />;
 }
 
 const styles = StyleSheet.create({

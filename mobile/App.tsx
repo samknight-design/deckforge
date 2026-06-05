@@ -10,19 +10,25 @@ import * as Linking from 'expo-linking';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
 import { supabase } from './lib/supabase';
-import { TIERS } from '@deckforge/shared/tiers';
 import type { Session } from '@supabase/supabase-js';
+import type { Deck } from './lib/db';
 import ScanScreen from './screens/ScanScreen';
+import DecksScreen from './screens/DecksScreen';
+import DeckDetailScreen from './screens/DeckDetailScreen';
 
 // Required for the in-app browser session to dismiss correctly when the
 // OAuth provider redirects back to us. Calling this once at module scope is
 // the documented pattern; safe to call even if there's no pending session.
 WebBrowser.maybeCompleteAuthSession();
 
-// Tiny route enum — replaces a real navigator until Phase RN3 brings in
-// expo-router. We only have two signed-in screens (home + scan) so a single
-// useState bit is enough.
-type Route = 'home' | 'scan';
+// Lightweight nav state machine. Avoids pulling in expo-router (which would
+// mean restructuring the entry point) — fine while the app has a handful of
+// screens. `deck` carries context for scan-into-deck + deck detail.
+type Nav =
+  | { screen: 'home' }
+  | { screen: 'scan'; deck?: Deck | null }
+  | { screen: 'decks' }
+  | { screen: 'deckDetail'; deck: Deck };
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -30,7 +36,7 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [route, setRoute] = useState<Route>('home');
+  const [nav, setNav] = useState<Nav>({ screen: 'home' });
 
   // Auth boot: read whatever session exists in SecureStore, subscribe to changes.
   useEffect(() => {
@@ -196,32 +202,61 @@ export default function App() {
     );
   }
 
-  if (route === 'scan') {
-    return <ScanScreen onBack={() => setRoute('home')} />;
+  const userId = session.user.id;
+
+  if (nav.screen === 'scan') {
+    return (
+      <ScanScreen
+        userId={userId}
+        targetDeck={nav.deck}
+        onBack={() => setNav(nav.deck ? { screen: 'deckDetail', deck: nav.deck } : { screen: 'home' })}
+      />
+    );
   }
 
+  if (nav.screen === 'decks') {
+    return (
+      <DecksScreen
+        userId={userId}
+        onBack={() => setNav({ screen: 'home' })}
+        onOpenDeck={(deck) => setNav({ screen: 'deckDetail', deck })}
+      />
+    );
+  }
+
+  if (nav.screen === 'deckDetail') {
+    return (
+      <DeckDetailScreen
+        deck={nav.deck}
+        onBack={() => setNav({ screen: 'decks' })}
+        onScanInto={(deck) => setNav({ screen: 'scan', deck })}
+      />
+    );
+  }
+
+  // Home
   return (
     <View style={styles.container}>
       <Text style={styles.title}>⚔️ DeckForge</Text>
-      <Text style={styles.subtitle}>Signed in</Text>
-      <Text style={styles.meta}>{session.user.email ?? '(anonymous)'}</Text>
-      <Text style={styles.meta}>id: {session.user.id.slice(0, 8)}…</Text>
-      <Text style={styles.meta}>
-        Loaded {Object.keys(TIERS).length} tiers from @deckforge/shared
-      </Text>
+      <Text style={styles.subtitle}>{session.user.email ?? 'Signed in'}</Text>
       <Pressable
-        style={({ pressed }) => [styles.primary, (pressed || busy) && { opacity: 0.6 }]}
-        onPress={() => setRoute('scan')}
-        disabled={busy}
+        style={({ pressed }) => [styles.primary, pressed && { opacity: 0.6 }]}
+        onPress={() => setNav({ screen: 'scan' })}
       >
         <Text style={styles.primaryText}>📷 Scan a card</Text>
       </Pressable>
       <Pressable
-        style={({ pressed }) => [styles.secondary, (pressed || busy) && { opacity: 0.6 }]}
+        style={({ pressed }) => [styles.secondary, pressed && { opacity: 0.6 }]}
+        onPress={() => setNav({ screen: 'decks' })}
+      >
+        <Text style={styles.secondaryText}>🗂️ My Decks</Text>
+      </Pressable>
+      <Pressable
+        style={({ pressed }) => [styles.signout, (pressed || busy) && { opacity: 0.6 }]}
         onPress={signOut}
         disabled={busy}
       >
-        <Text style={styles.secondaryText}>Sign out</Text>
+        <Text style={styles.signoutText}>Sign out</Text>
       </Pressable>
       <StatusBar style="light" />
     </View>
@@ -274,6 +309,8 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   secondaryText: { color: '#94a3b8', fontSize: 14, fontWeight: '500' },
+  signout: { marginTop: 24, paddingVertical: 8 },
+  signoutText: { color: '#475569', fontSize: 13 },
   google: {
     width: '100%',
     maxWidth: 360,
