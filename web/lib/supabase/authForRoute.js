@@ -11,6 +11,7 @@
 // Use this in any /api/* route handler that should accept both clients,
 // replacing the bare `createClient()` + `auth.getUser()` pattern.
 
+import { createClient } from '@supabase/supabase-js';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 
@@ -18,20 +19,20 @@ export async function getAuthedSupabase(request) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  // 1) Bearer token path (mobile). If present, create a client that attaches
-  //    it to every request — Supabase then reads the JWT and identifies the
-  //    user from the token's claims, no cookies involved.
+  // 1) Bearer token path (mobile). Use the plain JS client — @supabase/ssr's
+  //    createServerClient is cookie-oriented and does NOT correctly validate
+  //    a JWT passed via global.headers for auth.getUser(). The plain client
+  //    forwards the Authorization header to /auth/v1/user correctly.
   const auth = request.headers.get('Authorization') || request.headers.get('authorization');
   if (auth?.startsWith('Bearer ')) {
     const jwt = auth.slice('Bearer '.length).trim();
     if (jwt) {
-      const supabase = createServerClient(url, anonKey, {
-        cookies: { getAll: () => [], setAll: () => {} },
+      const supabase = createClient(url, anonKey, {
         global: { headers: { Authorization: `Bearer ${jwt}` } },
+        auth: { persistSession: false, autoRefreshToken: false },
       });
       const { data: { user } } = await supabase.auth.getUser();
       if (user) return { supabase, user };
-      // Fall through to cookie path if the bearer was somehow invalid.
     }
   }
 

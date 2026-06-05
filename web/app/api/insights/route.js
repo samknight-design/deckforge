@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { createClient, createServiceClient } from '@/lib/supabase/server';
+import { createServiceClient } from '@/lib/supabase/server';
+import { getAuthedSupabase } from '@/lib/supabase/authForRoute';
 import { checkInsightLimit, consumeInsight } from '@/lib/usage';
 import { recordEvent } from '@/lib/gamification';
 import { computeDeckHash } from '@/lib/deckUtils';
@@ -8,10 +9,9 @@ import Anthropic from '@anthropic-ai/sdk';
 
 export async function POST(request) {
   try {
-    const supabase = createClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    const { supabase, user } = await getAuthedSupabase(request);
 
-    if (authError || !user) {
+    if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
