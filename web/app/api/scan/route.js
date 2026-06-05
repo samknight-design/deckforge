@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { createClient, createServiceClient } from '@/lib/supabase/server';
+import { createServiceClient } from '@/lib/supabase/server';
+import { getAuthedSupabase } from '@/lib/supabase/authForRoute';
 import { fetchCardByName, fetchCardBySetAndNumber, fetchCardByNameAndSet } from '@/lib/scryfall';
 import { recordEvent } from '@/lib/gamification';
 import Anthropic from '@anthropic-ai/sdk';
@@ -8,19 +9,18 @@ import Anthropic from '@anthropic-ai/sdk';
 // visual hash matching isn't confident (low score / no good match), or as the
 // path for gallery uploads where a still photo skips the camera-matching flow.
 // Scanning is free and unlimited; no quota check or consume here.
+//
+// Auth: accepts BOTH cookie sessions (web PWA) and Bearer JWTs (React Native
+// mobile) via getAuthedSupabase.
 
 export async function POST(request) {
   try {
-    const supabase = createClient();
-
-    // Round 1: auth check + form parse in parallel
-    const [authResult, formData] = await Promise.all([
-      supabase.auth.getUser(),
+    // Auth + form parse in parallel.
+    const [{ user }, formData] = await Promise.all([
+      getAuthedSupabase(request),
       request.formData(),
     ]);
-
-    const { data: { user }, error: authError } = authResult;
-    if (authError || !user) {
+    if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 

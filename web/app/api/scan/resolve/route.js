@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { createClient, createServiceClient } from '@/lib/supabase/server';
+import { createServiceClient } from '@/lib/supabase/server';
+import { getAuthedSupabase } from '@/lib/supabase/authForRoute';
 import { fetchCardById } from '@/lib/scryfall';
 import { recordEvent } from '@/lib/gamification';
 
@@ -10,12 +11,13 @@ import { recordEvent } from '@/lib/gamification';
 // No Claude call, no scan quota — scanning is free and unlimited on this path.
 // The legacy /api/scan (Claude vision) remains as the Smart Scan fallback for
 // when visual matching isn't confident.
+//
+// Auth: accepts BOTH cookie sessions (web) and Bearer JWTs (mobile).
 
 export async function POST(request) {
   try {
-    const supabase = createClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const { user } = await getAuthedSupabase(request);
+    if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 

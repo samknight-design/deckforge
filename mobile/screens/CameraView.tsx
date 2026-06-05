@@ -1,26 +1,50 @@
-// The real camera screen. Only loaded by ScanScreen when we're confirmed not
-// in Expo Go (i.e. running in a dev client or production build) — Expo Go
-// would crash on the vision-camera import at the top of this file.
+// The real camera screen — only loaded outside Expo Go.
 //
-// Phase RN2a: live preview + a placeholder capture button. Phase RN2b adds
-// the frame processor (per-frame card-rectangle detection via iOS Vision /
-// Android ML Kit). Phase RN2c adds hash matching and the result sheet.
+// Phase RN2c: tap-to-scan captures a photo, posts it to /api/scan (Claude
+// Smart Scan) on Vercel, and shows the matched card in an in-screen result
+// overlay. This is the slow-but-works path — every scan costs an AI call.
+//
+// Phase RN2d (next): replace tap-to-scan with continuous frame processor
+// using iOS Vision / Android ML Kit, detect the card's 4 corners, warp,
+// compute dHash, and match against the bundled 114k-printing hash DB. Claude
+// becomes the fallback for cards the local matcher isn't confident on.
 
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import {
   Camera,
   useCameraDevice,
   useCameraPermission,
 } from 'react-native-vision-camera';
+import { apiFetch } from '../lib/api';
+
+type ScannedCard = {
+  scryfall_id: string;
+  card_name: string;
+  image_uri?: string | null;
+  type_line?: string;
+  set_name?: string;
+  set_code?: string;
+  price_eur?: number | null;
+};
 
 export default function CameraView({ onBack }: { onBack: () => void }) {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
+  const cameraRef = useRef<Camera>(null);
   const [requesting, setRequesting] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [result, setResult] = useState<ScannedCard | null>(null);
 
-  // Auto-prompt for camera permission on first mount. If denied, the user
-  // can re-tap the "Grant access" button.
+  // Auto-prompt for camera permission on first mount.
   useEffect(() => {
     if (!hasPermission && !requesting) {
       setRequesting(true);
@@ -29,13 +53,48 @@ export default function CameraView({ onBack }: { onBack: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const onCapture = async () => {
+    if (scanning || !cameraRef.current) return;
+    setScanning(true);
+    try {
+      // 1. Grab a still from the live preview. takePhoto returns { path, ...
+      //    width, height, etc. } where `path` is a file URI on local disk.
+      const photo = await cameraRef.current.takePhoto({
+        flash: 'off',
+        enableShutterSound: false,
+      });
+
+      // 2. POST the photo as multipart/form-data to /api/scan. In RN, the
+      //    FormData field for a file is { uri, type, name } (cast to any to
+      //    sidestep web's File-only typing).
+      const fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
+      const formData = new FormData();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (formData as any).append('image', { uri: fileUri, type: 'image/jpeg', name: 'scan.jpg' });
+
+      const res = await apiFetch('/api/scan', { method: 'POST', body: formData });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.card) {
+        const msg = data?.error || `HTTP ${res.status}`;
+        Alert.alert('Scan failed', String(msg).slice(0, 200));
+        return;
+      }
+      setResult(data.card as ScannedCard);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      Alert.alert('Scan error', msg.slice(0, 200));
+    } finally {
+      setScanning(false);
+    }
+  };
+
   if (!hasPermission) {
     return (
       <View style={styles.center}>
         <Text style={styles.title}>📷 Camera access needed</Text>
         <Text style={styles.body}>
-          DeckForge uses your phone&apos;s camera to scan cards on-device. We don&apos;t
-          record or upload video.
+          DeckForge uses your phone&apos;s camera to scan cards. Photos are only
+          sent to the server when you tap to scan.
         </Text>
         <Pressable
           style={styles.primary}
@@ -69,32 +128,108 @@ export default function CameraView({ onBack }: { onBack: () => void }) {
 
   return (
     <View style={styles.container}>
-      <Camera style={StyleSheet.absoluteFill} device={device} isActive={true} />
+      <Camera
+        ref={cameraRef}
+        style={StyleSheet.absoluteFill}
+        device={device}
+        isActive={!result}
+        photo={true}
+      />
 
       {/* Card-aspect viewfinder rectangle (63:88 = MTG card) */}
-      <View pointerEvents="none" style={styles.viewfinderWrap}>
-        <View style={styles.viewfinder} />
-        <Text style={styles.hint}>Line up the card inside the box</Text>
-      </View>
+      {!result && (
+        <View pointerEvents="none" style={styles.viewfinderWrap}>
+          <View style={[styles.viewfinder, scanning && { borderColor: '#f59e0b' }]} />
+          <Text style={styles.hint}>
+            {scanning ? 'Identifying card…' : 'Line up the card inside the box · tap to scan'}
+          </Text>
+        </View>
+      )}
 
       {/* Top bar */}
-      <View style={styles.topBar}>
-        <Pressable style={styles.iconButton} onPress={onBack}>
-          <Text style={styles.iconButtonText}>← Back</Text>
-        </Pressable>
-        <Text style={styles.topTitle}>Scan</Text>
-        <View style={{ width: 60 }} />
-      </View>
+      {!result && (
+        <View style={styles.topBar}>
+          <Pressable style={styles.iconButton} onPress={onBack}>
+            <Text style={styles.iconButtonText}>← Back</Text>
+          </Pressable>
+          <Text style={styles.topTitle}>Scan</Text>
+          <View style={{ width: 60 }} />
+        </View>
+      )}
 
-      {/* Capture button (no-op for now — Phase RN2b wires it up to the
-          frame processor + hash matcher) */}
-      <View style={styles.bottomBar}>
-        <Pressable style={styles.captureButton} onPress={() => {}}>
-          <Text style={styles.captureText}>⚡ Tap to Scan</Text>
-        </Pressable>
-        <Text style={styles.bottomHint}>
-          RN2a milestone — preview only. Hashing + auto-detect next.
+      {/* Capture button */}
+      {!result && (
+        <View style={styles.bottomBar}>
+          <Pressable
+            style={[styles.captureButton, scanning && { opacity: 0.6 }]}
+            onPress={onCapture}
+            disabled={scanning}
+          >
+            {scanning ? (
+              <ActivityIndicator color="#0a0e1a" />
+            ) : (
+              <Text style={styles.captureText}>⚡ Tap to Scan</Text>
+            )}
+          </Pressable>
+          <Text style={styles.bottomHint}>
+            ✨ Smart Scan via Claude · on-device matching coming in RN2d
+          </Text>
+        </View>
+      )}
+
+      {/* Result overlay */}
+      {result && <ResultOverlay card={result} onScanAnother={() => setResult(null)} onDone={onBack} />}
+    </View>
+  );
+}
+
+function ResultOverlay({
+  card,
+  onScanAnother,
+  onDone,
+}: {
+  card: ScannedCard;
+  onScanAnother: () => void;
+  onDone: () => void;
+}) {
+  return (
+    <View style={styles.resultBackdrop}>
+      <View style={styles.resultSheet}>
+        <Text style={styles.resultBadge}>✨ Smart Scan match</Text>
+        <View style={{ flexDirection: 'row', gap: 14, alignItems: 'flex-start' }}>
+          {card.image_uri ? (
+            <Image source={{ uri: card.image_uri }} style={styles.resultImage} />
+          ) : (
+            <View style={[styles.resultImage, { alignItems: 'center', justifyContent: 'center' }]}>
+              <Text style={{ fontSize: 30 }}>🃏</Text>
+            </View>
+          )}
+          <View style={{ flex: 1 }}>
+            <Text style={styles.resultName}>{card.card_name}</Text>
+            {!!card.type_line && <Text style={styles.resultMeta}>{card.type_line}</Text>}
+            {!!card.set_name && (
+              <Text style={styles.resultMeta}>
+                {card.set_name}
+                {card.set_code ? ` · ${card.set_code.toUpperCase()}` : ''}
+              </Text>
+            )}
+            {card.price_eur != null && (
+              <Text style={styles.resultPrice}>€{Number(card.price_eur).toFixed(2)}</Text>
+            )}
+          </View>
+        </View>
+        <Text style={styles.resultFootnote}>
+          &quot;Add to deck&quot; will appear once Phase RN3 ships the deck screens. For
+          now we just confirm the match.
         </Text>
+        <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+          <Pressable style={[styles.secondary, { flex: 1 }]} onPress={onDone}>
+            <Text style={styles.secondaryText}>Done</Text>
+          </Pressable>
+          <Pressable style={[styles.primary, { flex: 2 }]} onPress={onScanAnother}>
+            <Text style={styles.primaryText}>📷 Scan another</Text>
+          </Pressable>
+        </View>
       </View>
     </View>
   );
@@ -109,12 +244,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 24,
   },
-  title: {
-    color: '#f59e0b',
-    fontSize: 20,
-    fontWeight: '700',
-    marginBottom: 12,
-  },
+  title: { color: '#f59e0b', fontSize: 20, fontWeight: '700', marginBottom: 12 },
   body: {
     color: '#cbd5e1',
     fontSize: 14,
@@ -149,16 +279,12 @@ const styles = StyleSheet.create({
   },
   viewfinder: {
     width: 232,
-    height: 324, // 232 × (88/63) ≈ 324 — MTG card aspect
+    height: 324,
     borderColor: 'rgba(255,255,255,0.4)',
     borderWidth: 2,
     borderRadius: 12,
   },
-  hint: {
-    color: 'rgba(255,255,255,0.7)',
-    marginTop: 14,
-    fontSize: 13,
-  },
+  hint: { color: 'rgba(255,255,255,0.8)', marginTop: 14, fontSize: 13 },
   bottomBar: {
     position: 'absolute',
     bottom: 40,
@@ -172,22 +298,18 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     borderRadius: 32,
     marginBottom: 12,
-    shadowColor: '#f59e0b',
-    shadowOpacity: 0.4,
-    shadowRadius: 12,
+    minWidth: 200,
+    alignItems: 'center',
   },
   captureText: { color: '#0a0e1a', fontWeight: '700', fontSize: 14 },
-  bottomHint: {
-    color: 'rgba(255,255,255,0.5)',
-    fontSize: 11,
-    fontStyle: 'italic',
-  },
+  bottomHint: { color: 'rgba(255,255,255,0.5)', fontSize: 11, fontStyle: 'italic' },
   primary: {
     backgroundColor: '#f59e0b',
     paddingHorizontal: 24,
     paddingVertical: 14,
     borderRadius: 12,
     marginBottom: 12,
+    alignItems: 'center',
   },
   primaryText: { color: '#0a0e1a', fontWeight: '700' },
   secondary: {
@@ -197,6 +319,45 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 12,
+    alignItems: 'center',
   },
   secondaryText: { color: '#94a3b8', fontSize: 14, fontWeight: '500' },
+  resultBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.78)',
+    justifyContent: 'flex-end',
+  },
+  resultSheet: {
+    backgroundColor: '#111827',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    paddingBottom: 36,
+    borderColor: '#1e2d47',
+    borderWidth: 1,
+  },
+  resultBadge: {
+    alignSelf: 'flex-start',
+    color: '#fbbf24',
+    backgroundColor: 'rgba(245,158,11,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(245,158,11,0.4)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    fontSize: 10,
+    fontWeight: '700',
+    marginBottom: 12,
+    overflow: 'hidden',
+  },
+  resultImage: {
+    width: 90,
+    height: 126,
+    borderRadius: 8,
+    backgroundColor: '#1a2235',
+  },
+  resultName: { color: '#fff', fontWeight: '700', fontSize: 18, marginBottom: 4 },
+  resultMeta: { color: '#94a3b8', fontSize: 12, marginBottom: 2 },
+  resultPrice: { color: '#10b981', fontWeight: '700', marginTop: 6 },
+  resultFootnote: { color: '#64748b', fontSize: 11, marginTop: 14, lineHeight: 16 },
 });
