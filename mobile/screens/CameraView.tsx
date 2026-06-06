@@ -1,14 +1,19 @@
 // Real camera screen — only loaded outside Expo Go.
 //
-// Pipeline: takeSnapshot (preview-res) → jpeg-js decode → Hough corner detect
-// → perspective warp → dHash → nearest-neighbour in 114k DB
+// Pipeline: takeSnapshot (low-res preview) → jpeg-js decode → Hough corner detect
+// → perspective warp (68×88) → dHash → nearest-neighbour in 114k DB
 //   confident? → /api/scan/resolve  (free, ~200 ms, no AI)
-//   unsure?    → /api/scan Claude   (fallback, ~3 s)
+//   unsure?    → /api/scan Claude   (fallback, ~3 s, rate-limited for free users)
+//
+// KEY PERFORMANCE DECISION: Camera is forced to the lowest available resolution
+// (~320×240). jpeg-js is pure JS — at 320×240 (76k px) decode takes ~400ms;
+// at 1280×720 (921k px) it took 5–8s. The snapshot matches the preview format.
 //
 // Corner overlay: after capture, detected corners are animated onto the frozen
 // frame so users can see the card was correctly edge-detected before the match.
 //
 // After a match, the card is upserted into the user's library (user_cards).
+// Smart Scan (AI): free users get MAX_FREE_AI_SCANS per day; pro = unlimited.
 
 import { useEffect, useRef, useState, useMemo } from 'react';
 import {
@@ -25,6 +30,7 @@ import {
 import {
   Camera,
   useCameraDevice,
+  useCameraFormat,
   useCameraPermission,
 } from 'react-native-vision-camera';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -104,8 +110,18 @@ export default function CameraView({
   const { showXp } = useXpToast();
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
+
+  // Force lowest available resolution to minimise jpeg-js decode time.
+  // takeSnapshot() captures at the preview format's videoResolution.
+  // Typical phones: 320×240 or 640×480 → 12–50× fewer pixels than default 720p.
+  const format = useCameraFormat(device, [
+    { videoResolution: { width: 320, height: 240 } },
+  ]);
   const cameraRef = useRef<Camera>(null);
   const mounted = useRef(true);
+
+  // Free-tier AI scan limit (session + daily cap enforced on API too)
+  const MAX_FREE_AI_SCANS = 10;
 
   const [requesting, setRequesting] = useState(false);
   const [phase, setPhase] = useState<ScanPhase>('idle');
@@ -118,6 +134,8 @@ export default function CameraView({
   const [dbReady, setDbReady] = useState(false);
   const [autoCapture, setAutoCapture] = useState(false);
   const [currentDeck, setCurrentDeck] = useState<Deck | undefined>(targetDeck);
+  // Track AI (Smart Scan) usage this session. Reset when component unmounts.
+  const [aiScansUsed, setAiScansUsed] = useState(0);
   const autoCaptureRef = useRef(false);
   const autoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -253,7 +271,18 @@ export default function CameraView({
         }
       }
 
+      // Rate-limit Smart Scan for free users — checked here (also enforced server-side)
+      if (aiScansUsed >= MAX_FREE_AI_SCANS) {
+        Alert.alert(
+          'Daily Smart Scan limit reached',
+          `You've used ${MAX_FREE_AI_SCANS} AI-assisted scans today. Local matching couldn't identify this card. Try better lighting or a clearer angle, or upgrade to Pro for unlimited Smart Scans.`,
+        );
+        if (mounted.current) setFrozen(null);
+        return;
+      }
+
       set('uploading');
+      if (mounted.current) setAiScansUsed((n) => n + 1);
       const formData = new FormData();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (formData as any).append('image', { uri: fileUri, type: 'image/jpeg', name: 'scan.jpg' });
@@ -320,11 +349,12 @@ export default function CameraView({
   // ── Main scanner UI ─────────────────────────────────────────────────────────
   return (
     <View style={S.container}>
-      {/* Live camera — hidden once we have a frozen frame */}
+      {/* Live camera — low-res format to minimise jpeg-js decode time */}
       <Camera
         ref={cameraRef}
         style={StyleSheet.absoluteFill}
         device={device}
+        format={format}
         isActive={!result && !frozen}
         photo={true}
         video={true}
@@ -423,7 +453,11 @@ export default function CameraView({
             </Pressable>
           </View>
           <Text style={S.bottomHint}>
-            {autoCapture ? '🔄 Auto-scanning every 2.5s — point at a card' : (dbReady ? '⚡ On-device · AI fallback · auto-saved to library' : '✨ Smart Scan · local DB loading')}
+            {autoCapture
+              ? '🔄 Auto-scanning every 2.5s — point at a card'
+              : dbReady
+                ? `⚡ On-device · ${MAX_FREE_AI_SCANS - aiScansUsed} AI scans left today`
+                : '✨ Smart Scan · local DB loading…'}
           </Text>
         </View>
       )}

@@ -5,18 +5,22 @@ import { fetchCardByName, fetchCardBySetAndNumber, fetchCardByNameAndSet } from 
 import { recordEvent } from '@/lib/gamification';
 import Anthropic from '@anthropic-ai/sdk';
 
-// "Smart Scan" — Claude vision fallback. Used when the client's on-device
-// visual hash matching isn't confident (low score / no good match), or as the
-// path for gallery uploads where a still photo skips the camera-matching flow.
-// Scanning is free and unlimited; no quota check or consume here.
+// "Smart Scan" — Claude Haiku vision fallback. Used when local dHash matching
+// isn't confident. Costs ~£0.0025 per call (Haiku vision).
 //
-// Auth: accepts BOTH cookie sessions (web PWA) and Bearer JWTs (React Native
-// mobile) via getAuthedSupabase.
+// Rate limits (daily, enforced via check_and_increment_smart_scan Postgres fn):
+//   Free tier:  10 AI scans / day
+//   Pro tier:   unlimited
+//
+// Auth: accepts cookie sessions (web PWA) and Bearer JWTs (React Native mobile).
+
+const DAILY_LIMIT_FREE = 10;
+const DAILY_LIMIT_PRO  = 99999; // effectively unlimited
 
 export async function POST(request) {
   try {
     // Auth + form parse in parallel.
-    const [{ user }, formData] = await Promise.all([
+    const [{ supabase: authedSupa, user }, formData] = await Promise.all([
       getAuthedSupabase(request),
       request.formData(),
     ]);
@@ -31,6 +35,26 @@ export async function POST(request) {
 
     const arrayBuffer = await imageFile.arrayBuffer();
     const serviceClient = createServiceClient();
+
+    // Check + consume one Smart Scan credit
+    const { data: profileRow } = await serviceClient
+      .from('profiles')
+      .select('tier')
+      .eq('id', user.id)
+      .single();
+    const isPro = profileRow?.tier === 'pro';
+    const dailyLimit = isPro ? DAILY_LIMIT_PRO : DAILY_LIMIT_FREE;
+
+    const { data: limitData } = await serviceClient.rpc('check_and_increment_smart_scan', {
+      p_user_id: user.id,
+      p_daily_limit: dailyLimit,
+    });
+    if (limitData && !limitData.allowed) {
+      return NextResponse.json(
+        { error: `Smart Scan limit reached (${limitData.used}/${dailyLimit} today). Upgrade to Pro for unlimited AI scans.` },
+        { status: 429 }
+      );
+    }
 
     // Convert image to base64 (Web API — works everywhere)
     const uint8Array = new Uint8Array(arrayBuffer);
