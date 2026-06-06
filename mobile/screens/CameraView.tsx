@@ -32,6 +32,8 @@ import { apiFetch } from '../lib/api';
 import { addCardToDeck, addToLibrary, type Deck, type CardRef } from '../lib/db';
 import { matchPhoto, prepareScanDb } from '../lib/scanLocal';
 import { useTheme } from '../lib/theme';
+import { tryCompleteChallenge } from '../lib/challenges';
+import { useXpToast } from '../lib/xpToast';
 import DeckPickerSheet from '../components/DeckPickerSheet';
 
 const { width: SW, height: SH } = Dimensions.get('window');
@@ -99,6 +101,7 @@ export default function CameraView({
   onBack: () => void;
 }) {
   const { colors, formatPrice } = useTheme();
+  const { showXp } = useXpToast();
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
   const cameraRef = useRef<Camera>(null);
@@ -239,8 +242,10 @@ export default function CameraView({
         if (res.ok && data?.card) {
           card.scryfall_id = data.card.scryfall_id;
           card.card_name = data.card.card_name;
-          // Save to library
           await addToLibrary(userId, card, isFoil).catch(() => {});
+          tryCompleteChallenge(userId, 'scan_cards').then((r) => {
+            if (r.justCompleted) showXp(r.xpEarned, 'Card Scanner complete!');
+          });
           if (mounted.current) {
             setResult({ ...data.card, _engine: 'local', _detected: localMatch.detected });
           }
@@ -262,6 +267,9 @@ export default function CameraView({
       card.scryfall_id = data.card.scryfall_id;
       card.card_name = data.card.card_name;
       await addToLibrary(userId, card, isFoil).catch(() => {});
+      tryCompleteChallenge(userId, 'scan_cards').then((r) => {
+        if (r.justCompleted) showXp(r.xpEarned, 'Card Scanner complete!');
+      });
       if (mounted.current) {
         setResult({ ...data.card, _engine: 'smart', _detected: localMatch?.detected ?? false });
       }

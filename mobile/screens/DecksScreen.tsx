@@ -13,6 +13,8 @@ import {
 import { getDecks, shareDeck, type Deck } from '../lib/db';
 import { useTheme, BRACKET_COLORS, BRACKET_NAMES } from '../lib/theme';
 import DeckPickerSheet from '../components/DeckPickerSheet';
+import { tryCompleteChallenge } from '../lib/challenges';
+import { useXpToast } from '../lib/xpToast';
 
 type ViewMode = 'list' | 'compact' | 'tiled';
 
@@ -27,6 +29,7 @@ export default function DecksScreen({
 }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const { showXp } = useXpToast();
 
   const [decks, setDecks] = useState<Deck[] | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -49,6 +52,9 @@ export default function DecksScreen({
     try {
       const token = deck.share_token || (await shareDeck(deck.id));
       await Share.share({ message: `Check out my deck "${deck.name}" on DeckForge!`, url: `https://deckforge-eta.vercel.app/d/${token}` });
+      tryCompleteChallenge(userId, 'share_deck').then((r) => {
+        if (r.justCompleted) showXp(r.xpEarned, 'Community Share complete!');
+      });
     } catch {
       Alert.alert('Share failed', 'Could not generate a share link.');
     } finally {

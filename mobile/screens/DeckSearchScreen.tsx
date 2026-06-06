@@ -17,6 +17,8 @@ import {
 } from 'react-native';
 import { searchPublicDecks, toggleDeckLike, type PublicDeck } from '../lib/db';
 import { useTheme, BRACKET_COLORS, BRACKET_NAMES } from '../lib/theme';
+import { tryCompleteChallenge } from '../lib/challenges';
+import { useXpToast } from '../lib/xpToast';
 
 type FormatFilter = 'all' | 'commander' | '60card';
 
@@ -31,6 +33,7 @@ export default function DeckSearchScreen({
 }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const { showXp } = useXpToast();
 
   const [query, setQuery] = useState('');
   const [format, setFormat] = useState<FormatFilter>('all');
@@ -65,7 +68,13 @@ export default function DeckSearchScreen({
     setDecks((prev) => (prev || []).map((d) =>
       d.id === deck.id ? { ...d, like_count: Math.max(0, (d.like_count || 0) + (wasLiked ? -1 : 1)) } : d
     ));
-    await toggleDeckLike(userId, deck.id).catch(() => {
+    await toggleDeckLike(userId, deck.id).then(() => {
+      if (!wasLiked) {
+        tryCompleteChallenge(userId, 'like_decks').then((r) => {
+          if (r.justCompleted) showXp(r.xpEarned, 'Community Spirit complete!');
+        });
+      }
+    }).catch(() => {
       setLikedIds((prev) => {
         const next = new Set(prev);
         wasLiked ? next.add(deck.id) : next.delete(deck.id);

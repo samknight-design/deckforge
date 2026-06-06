@@ -11,6 +11,9 @@ import {
 } from 'react-native';
 import { getTopDecks, getLibraryStats, getProfile, toggleDeckLike, type PublicDeck, type Profile } from '../lib/db';
 import { useTheme, xpToLevel, BRACKET_COLORS, BRACKET_NAMES } from '../lib/theme';
+import DailyChallengesWidget from '../components/DailyChallengesWidget';
+import { tryCompleteChallenge } from '../lib/challenges';
+import { useXpToast } from '../lib/xpToast';
 
 // Static news items — swap for a Supabase `news_items` table query later
 const NEWS = [
@@ -91,7 +94,14 @@ export default function HomeScreen({
     setTopDecks((prev) => (prev || []).map((d) =>
       d.id === deck.id ? { ...d, like_count: Math.max(0, (d.like_count || 0) + (wasLiked ? -1 : 1)) } : d
     ));
-    await toggleDeckLike(userId, deck.id).catch(() => {
+    await toggleDeckLike(userId, deck.id).then(() => {
+      if (!wasLiked) {
+        // Just liked — try to advance like_decks challenge
+        tryCompleteChallenge(userId, 'like_decks').then((r) => {
+          if (r.justCompleted) showXp(r.xpEarned, 'Community Spirit complete!');
+        });
+      }
+    }).catch(() => {
       // revert on error
       setLikedIds((prev) => {
         const next = new Set(prev);
@@ -101,6 +111,7 @@ export default function HomeScreen({
     });
   };
 
+  const { showXp } = useXpToast();
   const levelInfo = profile ? xpToLevel(profile.xp || 0) : null;
   const avatarDisplay = profile?.avatar_key
     ? getAvatar(profile.avatar_key)
@@ -163,6 +174,9 @@ export default function HomeScreen({
           <Text style={styles.valueBannerAmount}>{formatPrice(stats.totalValue)}</Text>
         </View>
       )}
+
+      {/* Daily challenges */}
+      <DailyChallengesWidget userId={userId} />
 
       {/* News widget */}
       <Pressable style={styles.newsHeader} onPress={() => setNewsExpanded((e) => !e)}>

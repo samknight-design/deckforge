@@ -10,6 +10,8 @@ import {
 import { apiFetch } from '../lib/api';
 import { type Deck } from '../lib/db';
 import { useTheme, BRACKET_NAMES, BRACKET_COLORS } from '../lib/theme';
+import { tryCompleteChallenge } from '../lib/challenges';
+import { useXpToast } from '../lib/xpToast';
 
 type InsightData = {
   bracket: number;
@@ -50,12 +52,15 @@ function Section({ title, children, color }: { title: string; children: React.Re
 export default function InsightsScreen({
   deck,
   onBack,
+  userId,
 }: {
   deck: Deck;
   onBack: () => void;
+  userId?: string;
 }) {
   const { colors, formatPrice } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const { showXp } = useXpToast();
 
   const [insight, setInsight] = useState<InsightResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -75,6 +80,12 @@ export default function InsightsScreen({
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       setInsight(data);
+      // Challenge: run_insights (only on fresh generation, not cache)
+      if (!data.cached && userId) {
+        tryCompleteChallenge(userId, 'run_insights').then((r) => {
+          if (r.justCompleted) showXp(r.xpEarned, 'AI Analyst complete!');
+        });
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

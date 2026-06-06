@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -13,6 +13,7 @@ import {
 import { getProfile, getLibraryStats, getDecks, updateProfile, type Profile } from '../lib/db';
 import { useTheme, xpToLevel, BRACKET_COLORS } from '../lib/theme';
 import { AVATAR_OPTIONS } from './HomeScreen';
+import RewardsTrack from '../components/RewardsTrack';
 
 const LEVEL_TITLES: Record<number, string> = {
   1: 'Apprentice', 5: 'Journeyman', 10: 'Adept',
@@ -25,19 +26,6 @@ function getLevelTitle(level: number): string {
   return 'Apprentice';
 }
 
-// Level milestones that unlock rewards
-const LEVEL_UNLOCKS = [
-  { level: 1,  reward: '🌿 Forest avatar unlocked' },
-  { level: 5,  reward: '⚔️ Knight avatar unlocked' },
-  { level: 10, reward: '🔮 Mystic avatar unlocked' },
-  { level: 15, reward: '🐉 Dragon avatar unlocked' },
-  { level: 20, reward: '⚡ Storm avatar unlocked + Silver border' },
-  { level: 30, reward: '🧙 Wizard avatar unlocked' },
-  { level: 40, reward: '🦅 Eagle avatar unlocked + Gold border' },
-  { level: 50, reward: '☄️ Comet avatar unlocked + Extra AI insight/mo' },
-  { level: 75, reward: '🔥 Flame avatar unlocked + Diamond border' },
-  { level: 100, reward: '🌊 Wave avatar unlocked + Planeswalker frame' },
-];
 
 const ACHIEVEMENTS = [
   { key: 'first_scan', label: 'First Scan', icon: '📷', desc: 'Scan your first card' },
@@ -159,24 +147,10 @@ export default function ProfileScreen({
         ))}
       </View>
 
-      {/* Level unlocks dashboard */}
-      <Text style={styles.sectionTitle}>🔓 Level Unlocks</Text>
-      <View style={styles.unlocksCard}>
-        {LEVEL_UNLOCKS.map((u) => {
-          const unlocked = level >= u.level;
-          return (
-            <View key={u.level} style={[styles.unlockRow, !unlocked && styles.unlockLocked]}>
-              <View style={[styles.unlockDot, { backgroundColor: unlocked ? colors.accent : colors.border }]} />
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.unlockLevel, { color: unlocked ? colors.accent : colors.textDim }]}>
-                  Level {u.level}
-                </Text>
-                <Text style={[styles.unlockReward, !unlocked && { color: colors.textDim }]}>{u.reward}</Text>
-              </View>
-              {unlocked && <Text style={{ color: colors.success, fontSize: 14 }}>✓</Text>}
-            </View>
-          );
-        })}
+      {/* Rewards track */}
+      <Text style={styles.sectionTitle}>🎖️ Season Rewards</Text>
+      <View style={{ marginHorizontal: 20, marginBottom: 24 }}>
+        <RewardsTrack currentLevel={level} isPro={profile?.tier === 'pro'} />
       </View>
 
       {/* Achievements */}

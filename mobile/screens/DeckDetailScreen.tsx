@@ -17,6 +17,8 @@ import {
   type DeckCard,
 } from '../lib/db';
 import { useTheme, BRACKET_COLORS, BRACKET_NAMES } from '../lib/theme';
+import { tryCompleteChallenge } from '../lib/challenges';
+import { useXpToast } from '../lib/xpToast';
 import ManaCost from '../components/ManaCost';
 import CardDetailModal, { type CardDetailData } from '../components/CardDetailModal';
 
@@ -50,14 +52,17 @@ export default function DeckDetailScreen({
   onBack,
   onScanInto,
   onInsights,
+  userId,
 }: {
   deck: Deck;
   onBack: () => void;
   onScanInto: (deck: Deck) => void;
   onInsights?: (deck: Deck) => void;
+  userId?: string;
 }) {
   const { colors, formatPrice } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const { showXp } = useXpToast();
 
   const [deck, setDeck] = useState<Deck>(initialDeck);
   const [cards, setCards] = useState<DeckCard[] | null>(null);
@@ -83,6 +88,12 @@ export default function DeckDetailScreen({
     });
     try {
       await setDeckCardQuantity(card.id, next);
+      // Challenge: add_to_deck (only on increases, not removals)
+      if (delta > 0 && userId) {
+        tryCompleteChallenge(userId, 'add_to_deck', delta).then((r) => {
+          if (r.justCompleted) showXp(r.xpEarned, 'Deck Builder complete!');
+        });
+      }
     } catch {
       load();
     }

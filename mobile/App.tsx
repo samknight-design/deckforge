@@ -27,6 +27,9 @@ import DeckSearchScreen from './screens/DeckSearchScreen';
 import InsightsScreen from './screens/InsightsScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import SettingsScreen from './screens/SettingsScreen';
+import OnboardingScreen from './screens/OnboardingScreen';
+import { XpToastProvider } from './lib/xpToast';
+import { getProfile } from './lib/db';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -159,6 +162,14 @@ function AuthedApp({ session }: { session: Session }) {
 
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [screen, setScreen] = useState<Screen>({ id: 'home' });
+  const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null); // null = loading
+
+  // Check if onboarding is needed (username not yet set)
+  useEffect(() => {
+    getProfile(userId)
+      .then((p) => setOnboardingDone(!!p?.username))
+      .catch(() => setOnboardingDone(true)); // On error, don't block the app
+  }, [userId]);
 
   const goTab = (t: Tab) => {
     setActiveTab(t);
@@ -179,6 +190,21 @@ function AuthedApp({ session }: { session: Session }) {
   };
 
   // ── Screen routing ──────────────────────────────────────────────────────────
+
+  // Show nothing while we check the profile
+  if (onboardingDone === null) {
+    return <View style={{ flex: 1, backgroundColor: colors.bg }} />;
+  }
+
+  // First-time user — must complete onboarding before entering the app
+  if (!onboardingDone) {
+    return (
+      <XpToastProvider>
+        <OnboardingScreen userId={userId} onComplete={() => setOnboardingDone(true)} />
+        <StatusBar style={theme === 'dark' ? 'light' : 'dark'} />
+      </XpToastProvider>
+    );
+  }
 
   if (screen.id === 'scan') {
     return (
@@ -202,6 +228,7 @@ function AuthedApp({ session }: { session: Session }) {
     return (
       <InsightsScreen
         deck={screen.deck}
+        userId={userId}
         onBack={() => setScreen({ id: 'deckDetail', deck: screen.deck })}
       />
     );
@@ -218,6 +245,7 @@ function AuthedApp({ session }: { session: Session }) {
   }
 
   return (
+    <XpToastProvider>
     <View style={[appStyles.root, { backgroundColor: colors.bg }]}>
       {/* Tab content */}
       <View style={{ flex: 1 }}>
@@ -243,6 +271,7 @@ function AuthedApp({ session }: { session: Session }) {
         {screen.id === 'deckDetail' && (
           <DeckDetailScreen
             deck={screen.deck}
+            userId={userId}
             onBack={() => setScreen({ id: 'decks' })}
             onScanInto={(deck) => goScan(deck)}
             onInsights={(deck) => setScreen({ id: 'insights', deck })}
@@ -267,6 +296,7 @@ function AuthedApp({ session }: { session: Session }) {
 
       <StatusBar style={theme === 'dark' ? 'light' : 'dark'} />
     </View>
+    </XpToastProvider>
   );
 }
 
