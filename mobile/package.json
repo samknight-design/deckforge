@@ -16,6 +16,7 @@
     "expo": "~54.0.0",
     "expo-asset": "~12.0.13",
     "expo-auth-session": "~7.0.11",
+    "expo-build-properties": "~1.0.10",
     "expo-constants": "~18.0.13",
     "expo-crypto": "~15.0.9",
     "expo-dev-client": "~6.0.21",
@@ -28,9 +29,11 @@
     "jpeg-js": "^0.4.4",
     "react": "19.1.0",
     "react-native": "0.81.5",
+    "react-native-fast-opencv": "^0.4.8",
     "react-native-url-polyfill": "^3.0.0",
     "react-native-vision-camera": "^4.7.3",
-    "react-native-worklets-core": "^1.6.3"
+    "react-native-worklets-core": "^1.6.3",
+    "vision-camera-resize-plugin": "^3.2.0"
   },
   "devDependencies": {
     "@babel/plugin-proposal-nullish-coalescing-operator": "^7.18.6",

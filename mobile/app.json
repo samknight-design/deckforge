@@ -17,7 +17,6 @@
     },
     "android": {
       "package": "app.deckforge",
-      "minSdkVersion": 26,
       "permissions": [
         "android.permission.CAMERA"
       ],
@@ -38,6 +37,12 @@
         {
           "cameraPermissionText": "DeckForge uses your camera to scan Magic: The Gathering cards. Images stay on-device unless Smart Scan is needed.",
           "enableFrameProcessors": true
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": { "minSdkVersion": 26 }
         }
       ]
     ],

@@ -44,7 +44,7 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'diag-v2';
+const BUILD_TAG = 'opencv-v1';
 
 const FP_MAX_DIST          = 75;
 const FP_MIN_GAP           = 7;
@@ -141,6 +141,8 @@ type ScannedCard = {
   _gap?: number;
   _detected?: boolean;
   _confident?: boolean;
+  _contours?: number;
+  _quads?: number;
 };
 
 type ScanNotif = { type: 'success' | 'warn' | 'error'; text: string; sub?: string; engine?: Engine };
@@ -380,17 +382,18 @@ export default function CameraView({
     scanBlocked.value = true;
 
     try {
-      const photo = await cameraRef.current.takeSnapshot({ quality: 30 });
+      const photo = await cameraRef.current.takeSnapshot({ quality: 60 });
       const fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
-      const { matchPhoto } = await import('../lib/scanLocal');
+      const { matchPhotoOpenCV } = await import('../lib/scanOpenCV');
       const base64 = await FileSystem.readAsStringAsync(fileUri, {
         encoding: FileSystem.EncodingType.Base64,
       });
 
-      const match = await matchPhoto(base64);
-      if (match) {
-        // DIAGNOSTIC: always show the local best guess + numbers (confident or
+      const match = await matchPhotoOpenCV(base64);
+      if (match?.scryfallId) {
+        // DIAGNOSTIC: always show the OpenCV best guess + numbers (confident or
         // not) so we can read on screen whether the matcher got the right card.
+        const confident = match.detected && match.distance <= 70 && match.gap >= 5;
         try {
           const res = await apiFetch('/api/scan/resolve', {
             method: 'POST',
@@ -403,9 +406,11 @@ export default function CameraView({
               ...data.card,
               _engine: 'local',
               _dist: match.distance,
-              _gap: match.runnerUp - match.distance,
+              _gap: match.gap,
               _detected: match.detected,
-              _confident: match.confident,
+              _confident: confident,
+              _contours: match.contourCount,
+              _quads: match.quadCount,
             });
             return;
           }
@@ -667,7 +672,8 @@ export default function CameraView({
                 </Text>
                 {result._dist != null && (
                   <Text style={S.debugLine}>
-                    dist={result._dist} · gap={result._gap} · {result._detected ? 'corners' : 'crop'} · {result._confident ? 'CONFIDENT' : 'low-conf'}
+                    dist={result._dist} · gap={result._gap} · {result._detected ? '📐 card found' : '✂️ no card (crop)'}
+                    {result._contours != null ? ` · contours=${result._contours} quads=${result._quads}` : ''} · {result._confident ? 'CONFIDENT' : 'low-conf'}
                   </Text>
                 )}
                 <Text style={S.cardName}>{result.card_name}</Text>
