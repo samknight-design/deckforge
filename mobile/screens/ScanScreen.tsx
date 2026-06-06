@@ -43,8 +43,28 @@ export default function ScanScreen({
   }
 
   // In a dev client or standalone build — load the real camera screen.
-  // Using require() (not import) so the vision-camera import only happens
-  // when we know the native module is present.
+  // The require()s happen INSIDE CameraHost (a child of ErrorBoundary) so that
+  // even a module-eval / asset-resolution crash is caught and shown on screen
+  // rather than white-screening the app. vision-camera is only require()'d here,
+  // never in Expo Go (guarded above).
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const ErrorBoundary = require('../components/ErrorBoundary').default;
+  return (
+    <ErrorBoundary onBack={onBack}>
+      <CameraHost userId={userId} targetDeck={targetDeck} onBack={onBack} />
+    </ErrorBoundary>
+  );
+}
+
+function CameraHost({
+  userId,
+  targetDeck,
+  onBack,
+}: {
+  userId: string;
+  targetDeck?: Deck | null;
+  onBack: () => void;
+}) {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const CameraView = require('./CameraView').default;
   return <CameraView userId={userId} targetDeck={targetDeck} onBack={onBack} />;

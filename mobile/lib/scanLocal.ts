@@ -9,7 +9,8 @@
 // decodes in ~400ms; 1280×720 = 921k px took 5–8s. DO NOT capture at high res.
 
 import { Asset } from 'expo-asset';
-import * as FileSystem from 'expo-file-system/legacy';
+import { File } from 'expo-file-system';
+import * as LegacyFS from 'expo-file-system/legacy';
 import { Buffer } from 'buffer';
 import { decode as decodeJpeg } from 'jpeg-js';
 import {
@@ -62,12 +63,36 @@ const CROP_MIN_GAP      = 8;    // winner leads runner-up by ≥ 8 bits
 
 let dbPromise: Promise<LoadedDb> | null = null;
 
-// Load the bundled DB once: ~3.5 MB hashes + ~1.8 MB packed ids. Both are
-// binary (base64-decoded byte slices) — NO JSON.parse, which used to freeze the
-// UI for several seconds parsing an 11 MB index. Memoised so later scans reuse it.
-export function prepareScanDb(): Promise<LoadedDb> {
+// How the bytes were read — surfaced on screen so we can tell native-fast vs
+// pure-JS-slow path apart during debugging.
+export let dbReadMethod: 'native' | 'base64-fallback' | 'unknown' = 'unknown';
+
+// Read a file's raw bytes. FAST PATH: expo-file-system's native File.bytes()
+// hands back a Uint8Array directly (no base64, no pure-JS decode — does NOT block
+// the JS thread). FALLBACK: legacy readAsStringAsync + Buffer base64 decode (pure
+// JS, slow, blocks) only if the native API isn't in this build.
+async function readBytes(localUri: string): Promise<Uint8Array> {
+  try {
+    const f = new File(localUri);
+    const b = await f.bytes();
+    dbReadMethod = 'native';
+    return b;
+  } catch {
+    const b64 = await LegacyFS.readAsStringAsync(localUri, { encoding: LegacyFS.EncodingType.Base64 });
+    dbReadMethod = 'base64-fallback';
+    return new Uint8Array(Buffer.from(b64, 'base64'));
+  }
+}
+
+// Load the bundled DB once: ~3.5 MB hashes + ~1.8 MB packed ids, both binary.
+// NO JSON.parse and (on the native path) NO base64 — so it doesn't freeze the UI.
+// `onStage` reports progress for on-screen diagnostics. Memoised; a failed load
+// clears the memo so it can be retried.
+export function prepareScanDb(onStage?: (s: string) => void): Promise<LoadedDb> {
   if (dbPromise) return dbPromise;
   dbPromise = (async () => {
+    const t0 = Date.now();
+    onStage?.('Locating database…');
     const binMod = require('../assets/hashes/cards.bin');
     const idsMod = require('../assets/hashes/cards.ids.bin');
     const [binAsset, idsAsset] = await Promise.all([
@@ -75,16 +100,17 @@ export function prepareScanDb(): Promise<LoadedDb> {
       Asset.fromModule(idsMod).downloadAsync(),
     ]);
 
-    const [binB64, idsB64] = await Promise.all([
-      FileSystem.readAsStringAsync(binAsset.localUri!, { encoding: FileSystem.EncodingType.Base64 }),
-      FileSystem.readAsStringAsync(idsAsset.localUri!, { encoding: FileSystem.EncodingType.Base64 }),
-    ]);
+    onStage?.('Reading hashes…');
+    const bytes = await readBytes(binAsset.localUri!);
+    onStage?.('Reading card index…');
+    const ids = await readBytes(idsAsset.localUri!);
 
-    const bytes = new Uint8Array(Buffer.from(binB64, 'base64'));
-    const ids = new Uint8Array(Buffer.from(idsB64, 'base64'));
-
-    return { db: parseHashDb(bytes), ids };
+    const parsed = parseHashDb(bytes);
+    onStage?.(`Ready · ${parsed.count} cards · ${Date.now() - t0}ms · ${dbReadMethod}`);
+    return { db: parsed, ids };
   })();
+  // On failure, clear the memo so the next attempt can retry instead of caching the rejection.
+  dbPromise.catch(() => { dbPromise = null; });
   return dbPromise;
 }
 

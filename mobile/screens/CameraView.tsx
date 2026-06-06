@@ -180,6 +180,13 @@ export default function CameraView({
   const [dbFlat, setDbFlat]   = useState<Uint8Array | null>(null);
   const [dbCount, setDbCount] = useState(0);
   const [dbIds, setDbIds]     = useState<Uint8Array | null>(null);
+
+  // On-screen diagnostics (the user can't read Metro logs)
+  const [loadStage, setLoadStage] = useState('Starting…');
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // 'unknown' until the frame processor runs once; 'active' if raw pixels work,
+  // 'unavailable' if frame.toArrayBuffer() throws (needs the minSdkVersion-26 build)
+  const [fpStatus, setFpStatus] = useState<'unknown' | 'active' | 'unavailable'>('unknown');
   const [popcountTable]       = useState<number[]>(() => {
     const t = new Array(256); t[0] = 0;
     for (let i = 1; i < 256; i++) t[i] = (i & 1) + t[i >> 1];
@@ -191,6 +198,12 @@ export default function CameraView({
   const consecutiveCount = useSharedValue(0);
   const lastMatchIndex   = useSharedValue(-1);
   const scanBlocked      = useSharedValue(false);
+  const fpReported       = useSharedValue(false); // report fp health to JS only once
+
+  // Called from the worklet (once) to report whether raw-pixel access works.
+  const reportFp = useRunOnJS((ok: boolean) => {
+    if (mounted.current) setFpStatus(ok ? 'active' : 'unavailable');
+  }, []);
 
   // ── Notification animation (quick mode) ───────────────────────────────────
 
@@ -223,12 +236,17 @@ export default function CameraView({
 
   useEffect(() => {
     mounted.current = true;
-    prepareScanDb().then(({ db, ids }) => {
-      if (!mounted.current) return;
-      setDbFlat(db.flat);
-      setDbCount(db.count);
-      setDbIds(ids);
-    }).catch(e => console.warn('[scan] DB load failed:', e));
+    prepareScanDb((s) => { if (mounted.current) setLoadStage(s); })
+      .then(({ db, ids }) => {
+        if (!mounted.current) return;
+        setDbFlat(db.flat);
+        setDbCount(db.count);
+        setDbIds(ids);
+      })
+      .catch((e) => {
+        console.warn('[scan] DB load failed:', e);
+        if (mounted.current) setLoadError(e instanceof Error ? e.message : String(e));
+      });
     return () => {
       mounted.current = false;
       if (notifTimer.current) clearTimeout(notifTimer.current);
@@ -401,8 +419,10 @@ export default function CameraView({
     let bytes: Uint8Array;
     try {
       bytes = new Uint8Array(frame.toArrayBuffer());
+      if (!fpReported.value) { fpReported.value = true; reportFp(true); }
     } catch {
-      // Requires minSdkVersion 26 — EAS rebuild needed.
+      // frame.toArrayBuffer() needs minSdkVersion 26 — report once, then bail.
+      if (!fpReported.value) { fpReported.value = true; reportFp(false); }
       return;
     }
     const hash = dhashFromBytes(bytes, width, height, bytesPerRow, pixelFormat === 'yuv', 16);
@@ -420,7 +440,7 @@ export default function CameraView({
       lastMatchIndex.value = confident ? m.index : -1;
       consecutiveCount.value = confident ? 1 : 0;
     }
-  }, [dbFlat, dbCount, popcountTable, handleLocalMatch, scanBlocked, consecutiveCount, lastMatchIndex]);
+  }, [dbFlat, dbCount, popcountTable, handleLocalMatch, scanBlocked, consecutiveCount, lastMatchIndex, fpReported, reportFp]);
 
   // ── Permission / device guards ─────────────────────────────────────────────
 
@@ -517,16 +537,30 @@ export default function CameraView({
         <View pointerEvents="none" style={S.vfWrap}>
           <View style={[
             S.vfRect,
-            { borderColor: busy ? '#f59e0b' : dbLoaded ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)' },
+            { borderColor: loadError ? '#ef4444' : busy ? '#f59e0b' : dbLoaded ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)' },
           ]}>
             {busy && <View style={S.scanLine} />}
           </View>
           <Text style={S.vfHint}>
-            {!dbLoaded ? '⏳ Loading scanner…'
+            {loadError ? `⚠️ Load failed: ${loadError}`
+              : !dbLoaded ? `⏳ ${loadStage}`
               : resolving ? '⚡ Matched — saving…'
               : manualScanning ? '⚡ Scanning…'
               : quickMode ? '📷 Point at a card — auto-scans'
               : '📷 Point at a card — will pause for review'}
+          </Text>
+        </View>
+      )}
+
+      {/* ── Diagnostics strip (temporary) ───────────────────────────────── */}
+      {!result && (
+        <View pointerEvents="none" style={S.diag}>
+          <Text style={S.diagText}>
+            DB: {dbLoaded ? `✓ ${dbCount} cards` : '…'}   ·   Auto-scan: {
+              fpStatus === 'active' ? '✓ working'
+              : fpStatus === 'unavailable' ? '✗ needs new build'
+              : dbLoaded ? '… waiting for frames' : '…'
+            }
           </Text>
         </View>
       )}
@@ -681,6 +715,16 @@ const S = StyleSheet.create({
   vfHint: {
     color: 'rgba(255,255,255,0.88)', marginTop: 18, fontSize: 13,
     textAlign: 'center', paddingHorizontal: 20,
+  },
+
+  // Diagnostics strip
+  diag: {
+    position: 'absolute', bottom: 96, left: 16, right: 16, alignItems: 'center',
+  },
+  diagText: {
+    color: 'rgba(255,255,255,0.55)', fontSize: 11, fontWeight: '600',
+    backgroundColor: 'rgba(0,0,0,0.45)', paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: 10, overflow: 'hidden',
   },
 
   // Flash notification
