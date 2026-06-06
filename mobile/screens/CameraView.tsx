@@ -44,7 +44,7 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'standalone-v1';
+const BUILD_TAG = 'diag-v2';
 
 const FP_MAX_DIST          = 75;
 const FP_MIN_GAP           = 7;
@@ -136,6 +136,11 @@ type ScannedCard = {
   set_code?: string;
   price_eur?: number | null;
   _engine?: Engine;
+  // DIAGNOSTIC fields (shown in the review sheet so we can read real numbers)
+  _dist?: number;
+  _gap?: number;
+  _detected?: boolean;
+  _confident?: boolean;
 };
 
 type ScanNotif = { type: 'success' | 'warn' | 'error'; text: string; sub?: string; engine?: Engine };
@@ -191,6 +196,10 @@ export default function CameraView({
   // 'unknown' until the frame processor runs once; 'active' if raw pixels work,
   // 'unavailable' if frame.toArrayBuffer() throws (needs the minSdkVersion-26 build)
   const [fpStatus, setFpStatus] = useState<'unknown' | 'active' | 'unavailable'>('unknown');
+  // Live match readout (DIAGNOSTIC): best Hamming distance + gap, updated a few
+  // times per second from the frame processor, so we can see how close matches are.
+  const [liveDist, setLiveDist] = useState<number | null>(null);
+  const [liveGap, setLiveGap]   = useState<number | null>(null);
   const [popcountTable]       = useState<number[]>(() => {
     const t = new Array(256); t[0] = 0;
     for (let i = 1; i < 256; i++) t[i] = (i & 1) + t[i >> 1];
@@ -203,10 +212,18 @@ export default function CameraView({
   const lastMatchIndex   = useSharedValue(-1);
   const scanBlocked      = useSharedValue(false);
   const fpReported       = useSharedValue(false); // report fp health to JS only once
+  const frameTick        = useSharedValue(0);     // throttles the live match readout
 
   // Called from the worklet (once) to report whether raw-pixel access works.
   const reportFp = useRunOnJS((ok: boolean) => {
     if (mounted.current) setFpStatus(ok ? 'active' : 'unavailable');
+  }, []);
+
+  // Called from the worklet (throttled) with the live best distance/gap.
+  const reportMatch = useRunOnJS((dist: number, gap: number) => {
+    if (!mounted.current) return;
+    setLiveDist(dist);
+    setLiveGap(gap);
   }, []);
 
   // ── Notification animation (quick mode) ───────────────────────────────────
@@ -371,12 +388,33 @@ export default function CameraView({
       });
 
       const match = await matchPhoto(base64);
-      if (match?.confident) {
-        await handleLocalMatch(match.index);
-        return;
+      if (match) {
+        // DIAGNOSTIC: always show the local best guess + numbers (confident or
+        // not) so we can read on screen whether the matcher got the right card.
+        try {
+          const res = await apiFetch('/api/scan/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scryfall_id: match.scryfallId }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data?.card) {
+            setResult({
+              ...data.card,
+              _engine: 'local',
+              _dist: match.distance,
+              _gap: match.runnerUp - match.distance,
+              _detected: match.detected,
+              _confident: match.confident,
+            });
+            return;
+          }
+        } catch {
+          // fall through to Smart Scan
+        }
       }
 
-      // Not confident — try Smart Scan
+      // No local match (or resolve failed) — try Smart Scan
       if (aiScansUsed >= MAX_FREE_AI_SCANS) {
         Alert.alert('Daily AI limit reached', `${MAX_FREE_AI_SCANS} Smart Scans used today.`);
         resetScanner();
@@ -432,6 +470,11 @@ export default function CameraView({
     const hash = dhashFromBytes(bytes, width, height, bytesPerRow, pixelFormat === 'yuv', 16);
     const m = matchHashWorklet(hash, dbFlat, dbCount, 32, popcountTable);
     const confident = m.distance <= FP_MAX_DIST && (m.runnerUp - m.distance) >= FP_MIN_GAP && m.index >= 0;
+
+    // DIAGNOSTIC: report the live best distance/gap ~3×/sec so we can see on
+    // screen how close the matcher is getting on real cards.
+    frameTick.value++;
+    if (frameTick.value % 5 === 0) reportMatch(m.distance, m.runnerUp - m.distance);
     if (confident && m.index === lastMatchIndex.value) {
       consecutiveCount.value++;
       if (consecutiveCount.value >= STABLE_FRAMES_NEEDED) {
@@ -444,7 +487,7 @@ export default function CameraView({
       lastMatchIndex.value = confident ? m.index : -1;
       consecutiveCount.value = confident ? 1 : 0;
     }
-  }, [dbFlat, dbCount, popcountTable, handleLocalMatch, scanBlocked, consecutiveCount, lastMatchIndex, fpReported, reportFp]);
+  }, [dbFlat, dbCount, popcountTable, handleLocalMatch, scanBlocked, consecutiveCount, lastMatchIndex, fpReported, reportFp, frameTick, reportMatch]);
 
   // ── Permission / device guards ─────────────────────────────────────────────
 
@@ -556,15 +599,21 @@ export default function CameraView({
         </View>
       )}
 
-      {/* ── Diagnostics strip (temporary) ───────────────────────────────── */}
+      {/* ── Diagnostics strip (temporary, top so it's readable) ─────────── */}
       {!result && (
         <View pointerEvents="none" style={S.diag}>
           <Text style={S.diagText}>
-            [{BUILD_TAG}]  DB: {dbLoaded ? `✓ ${dbCount} cards` : '…'}   ·   Auto-scan: {
-              fpStatus === 'active' ? '✓ working'
-              : fpStatus === 'unavailable' ? '✗ needs new build'
-              : dbLoaded ? '… waiting for frames' : '…'
+            [{BUILD_TAG}]  DB: {dbLoaded ? `✓ ${dbCount}` : '…'}  ·  Auto-scan: {
+              fpStatus === 'active' ? '✓'
+              : fpStatus === 'unavailable' ? '✗ needs build'
+              : dbLoaded ? '…frames' : '…'
             }
+          </Text>
+          <Text style={S.diagBig}>
+            {liveDist != null ? `closest: dist=${liveDist}  gap=${liveGap}` : 'point at a card…'}
+          </Text>
+          <Text style={S.diagHint}>
+            lower dist = better · need dist≤{FP_MAX_DIST} & gap≥{FP_MIN_GAP} to lock
           </Text>
         </View>
       )}
@@ -616,6 +665,11 @@ export default function CameraView({
                 <Text style={[S.engineBadge, result._engine === 'smart' ? S.engineSmart : S.engineLocal]}>
                   {result._engine === 'smart' ? '✨ AI Smart Scan' : '⚡ On-device match'}
                 </Text>
+                {result._dist != null && (
+                  <Text style={S.debugLine}>
+                    dist={result._dist} · gap={result._gap} · {result._detected ? 'corners' : 'crop'} · {result._confident ? 'CONFIDENT' : 'low-conf'}
+                  </Text>
+                )}
                 <Text style={S.cardName}>{result.card_name}</Text>
                 {!!result.type_line && <Text style={S.cardMeta}>{result.type_line}</Text>}
                 {!!result.set_name && (
@@ -721,15 +775,26 @@ const S = StyleSheet.create({
     textAlign: 'center', paddingHorizontal: 20,
   },
 
-  // Diagnostics strip
+  // Diagnostics strip (top, below the top bar)
   diag: {
-    position: 'absolute', bottom: 96, left: 16, right: 16, alignItems: 'center',
+    position: 'absolute', top: 92, left: 16, right: 16, alignItems: 'center', gap: 4,
   },
   diagText: {
-    color: 'rgba(255,255,255,0.55)', fontSize: 11, fontWeight: '600',
-    backgroundColor: 'rgba(0,0,0,0.45)', paddingHorizontal: 10, paddingVertical: 4,
+    color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: '600',
+    backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 10, paddingVertical: 4,
     borderRadius: 10, overflow: 'hidden',
   },
+  diagBig: {
+    color: '#f59e0b', fontSize: 16, fontWeight: '800',
+    backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 12, paddingVertical: 5,
+    borderRadius: 10, overflow: 'hidden',
+  },
+  diagHint: {
+    color: 'rgba(255,255,255,0.5)', fontSize: 10,
+    backgroundColor: 'rgba(0,0,0,0.4)', paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: 8, overflow: 'hidden',
+  },
+  debugLine: { color: '#fbbf24', fontSize: 11, fontWeight: '700', marginBottom: 4 },
 
   // Flash notification
   notif: {
