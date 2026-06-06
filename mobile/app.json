@@ -38,8 +38,7 @@
           "cameraPermissionText": "DeckForge uses your camera to scan Magic: The Gathering cards. Images stay on-device unless Smart Scan is needed.",
           "enableFrameProcessors": true
         }
-      ],
-      "react-native-worklets-core"
+      ]
     ],
     "extra": {
       "apiBaseUrl": "https://deckforge-eta.vercel.app",
