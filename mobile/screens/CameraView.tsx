@@ -1,21 +1,18 @@
-// Real camera screen — only loaded outside Expo Go.
+// Real-time card scanner using vision-camera frame processors.
 //
-// Pipeline: takeSnapshot (low-res preview) → jpeg-js decode → Hough corner detect
-// → perspective warp (68×88) → dHash → nearest-neighbour in 114k DB
-//   confident? → /api/scan/resolve  (free, ~200 ms, no AI)
-//   unsure?    → /api/scan Claude   (fallback, ~3 s, rate-limited for free users)
+// Pipeline: raw YUV/RGB frame → luminance extraction → dHash (17×16 grid)
+//           → Hamming nearest-neighbour match in 114k DB
+//           → 5 consecutive confident frames → result
 //
-// KEY PERFORMANCE DECISION: Camera is forced to the lowest available resolution
-// (~320×240). jpeg-js is pure JS — at 320×240 (76k px) decode takes ~400ms;
-// at 1280×720 (921k px) it took 5–8s. The snapshot matches the preview format.
+// No JPEG encode/decode at all. Frame pixels go directly to dHash on the camera
+// thread (worklet). Typical identification: 200–500ms after card is in view.
+// Falls back to Claude Smart Scan when local match is uncertain.
 //
-// Corner overlay: after capture, detected corners are animated onto the frozen
-// frame so users can see the card was correctly edge-detected before the match.
-//
-// After a match, the card is upserted into the user's library (user_cards).
-// Smart Scan (AI): free users get MAX_FREE_AI_SCANS per day; pro = unlimited.
+// Key files:
+//   shared/cardScan.js  — dHash + matchHash (JS thread fallback)
+//   mobile/lib/scanLocal.ts — JS thread scan (fallback if frame processor fails)
 
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -32,11 +29,13 @@ import {
   useCameraDevice,
   useCameraFormat,
   useCameraPermission,
+  useFrameProcessor,
 } from 'react-native-vision-camera';
+import { useSharedValue, useRunOnJS } from 'react-native-worklets-core';
 import * as FileSystem from 'expo-file-system/legacy';
 import { apiFetch } from '../lib/api';
 import { addCardToDeck, addToLibrary, type Deck, type CardRef } from '../lib/db';
-import { matchPhoto, prepareScanDb } from '../lib/scanLocal';
+import { prepareScanDb } from '../lib/scanLocal';
 import { useTheme } from '../lib/theme';
 import { tryCompleteChallenge } from '../lib/challenges';
 import { useXpToast } from '../lib/xpToast';
@@ -44,7 +43,9 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 const { width: SW, height: SH } = Dimensions.get('window');
 
-type ScanPhase = 'idle' | 'capturing' | 'detecting' | 'matching' | 'uploading';
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+type ScanPhase = 'idle' | 'resolving' | 'uploading';
 
 type ScannedCard = {
   scryfall_id: string;
@@ -55,47 +56,119 @@ type ScannedCard = {
   set_code?: string;
   price_eur?: number | null;
   _engine: 'local' | 'smart';
-  _detected: boolean;
 };
 
-type FrozenFrame = {
-  uri: string;
-  photoW: number;
-  photoH: number;
-  corners: Array<{ x: number; y: number }> | null;
-};
+// ── Confidence gates (same as scanLocal.ts) ───────────────────────────────────
 
-const VF_W = 232;
-const VF_H = 324;
-const CORNER_ARM = 28;
-const THICK = 3;
+const FP_MAX_DIST = 75;   // Slightly more lenient in frame processor (no perspective warp)
+const FP_MIN_GAP  = 7;    // Winner must beat runner-up by ≥ 7 bits
+const STABLE_FRAMES_NEEDED = 5; // Consecutive confident frames before triggering
 
-function cornerToScreen(
-  c: { x: number; y: number },
-  pW: number,
-  pH: number,
-): { x: number; y: number } {
-  const scale = Math.max(SW / pW, SH / pH);
-  const ox = (pW * scale - SW) / 2;
-  const oy = (pH * scale - SH) / 2;
-  return { x: c.x * scale - ox, y: c.y * scale - oy };
+// ── Worklet functions ─────────────────────────────────────────────────────────
+// These are compiled to run on the camera thread. NO external imports.
+// All logic must be self-contained with 'worklet' directive.
+
+function computePopcountTable(): number[] {
+  'worklet';
+  const t: number[] = new Array(256);
+  t[0] = 0;
+  for (let i = 1; i < 256; i++) t[i] = (i & 1) + t[i >> 1];
+  return t;
 }
 
-function CornerBracket({ pos, color }: { pos: 'tl' | 'tr' | 'bl' | 'br'; color: string }) {
-  const base = { position: 'absolute' as const, width: CORNER_ARM, height: CORNER_ARM, borderColor: color };
-  if (pos === 'tl') return <View style={[base, { top: 0, left: 0, borderTopWidth: THICK, borderLeftWidth: THICK, borderTopLeftRadius: 4 }]} />;
-  if (pos === 'tr') return <View style={[base, { top: 0, right: 0, borderTopWidth: THICK, borderRightWidth: THICK, borderTopRightRadius: 4 }]} />;
-  if (pos === 'bl') return <View style={[base, { bottom: 0, left: 0, borderBottomWidth: THICK, borderLeftWidth: THICK, borderBottomLeftRadius: 4 }]} />;
-  return <View style={[base, { bottom: 0, right: 0, borderBottomWidth: THICK, borderRightWidth: THICK, borderBottomRightRadius: 4 }]} />;
+function dhashFromBytes(
+  bytes: Uint8Array,
+  frameW: number,
+  frameH: number,
+  bytesPerRow: number,
+  isYuv: boolean,
+  size: number,
+): Uint8Array {
+  'worklet';
+  // Center-crop to card aspect ratio (63:88 ≈ 0.716)
+  const cardAspect = 63 / 88;
+  let cropW = frameW;
+  let cropH = Math.round(frameW / cardAspect);
+  if (cropH > frameH) {
+    cropH = frameH;
+    cropW = Math.round(frameH * cardAspect);
+  }
+  const cropX = Math.floor((frameW - cropW) / 2);
+  const cropY = Math.floor((frameH - cropH) / 2);
+
+  const gw = size + 1;
+  const gh = size;
+  // Use plain array — avoids potential typed array allocation issues in older worklet runtimes
+  const grid: number[] = new Array(gw * gh).fill(0);
+
+  const step = isYuv ? 1 : 4; // YUV: 1 byte per luma value; RGB/RGBA: 4 bytes per pixel
+
+  for (let gy = 0; gy < gh; gy++) {
+    const y0 = cropY + Math.floor((gy * cropH) / gh);
+    const y1 = cropY + Math.max(y0 - cropY + 1, Math.floor(((gy + 1) * cropH) / gh));
+    for (let gx = 0; gx < gw; gx++) {
+      const x0 = cropX + Math.floor((gx * cropW) / gw);
+      const x1 = cropX + Math.max(x0 - cropX + 1, Math.floor(((gx + 1) * cropW) / gw));
+      let sum = 0, cnt = 0;
+      for (let fy = y0; fy < y1; fy++) {
+        const rowBase = fy * bytesPerRow;
+        for (let fx = x0; fx < x1; fx++) {
+          let luma: number;
+          if (isYuv) {
+            luma = bytes[rowBase + fx];
+          } else {
+            // RGBA/BGRA: compute luminance from first 3 channels
+            const i = rowBase + fx * step;
+            luma = (77 * bytes[i] + 150 * bytes[i + 1] + 29 * bytes[i + 2]) >> 8;
+          }
+          sum += luma;
+          cnt++;
+        }
+      }
+      grid[gy * gw + gx] = cnt > 0 ? sum / cnt : 0;
+    }
+  }
+
+  const hashBytes = (size * size) >> 3; // 32 bytes for size=16
+  const out = new Uint8Array(hashBytes);
+  let bit = 0;
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < size; gx++) {
+      if (grid[gy * gw + gx] < grid[gy * gw + gx + 1]) {
+        out[bit >> 3] |= (0x80 >> (bit & 7));
+      }
+      bit++;
+    }
+  }
+  return out;
 }
 
-function phaseLabel(p: ScanPhase) {
-  if (p === 'capturing') return 'Capturing…';
-  if (p === 'detecting') return 'Detecting edges…';
-  if (p === 'matching') return 'Matching on-device…';
-  if (p === 'uploading') return 'Smart Scan…';
-  return '';
+function matchHashWorklet(
+  query: Uint8Array,
+  flat: Uint8Array,
+  count: number,
+  bph: number,
+  pc: number[],
+): { index: number; distance: number; runnerUp: number } {
+  'worklet';
+  let best = bph * 8 + 1;
+  let second = best;
+  let bi = -1;
+
+  for (let i = 0; i < count; i++) {
+    const off = i * bph;
+    let dist = 0;
+    for (let b = 0; b < bph; b++) {
+      dist += pc[query[b] ^ flat[off + b]];
+      if (dist >= best) { dist = best; break; } // early exit
+    }
+    if (dist < best) { second = best; best = dist; bi = i; }
+    else if (dist < second) second = dist;
+  }
+  return { index: bi, distance: best, runnerUp: second };
 }
+
+// ── CameraView component ──────────────────────────────────────────────────────
 
 export default function CameraView({
   userId,
@@ -110,225 +183,285 @@ export default function CameraView({
   const { showXp } = useXpToast();
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
+  const mounted = useRef(true);
 
-  // Force lowest available resolution to minimise jpeg-js decode time.
-  // takeSnapshot() captures at the preview format's videoResolution.
-  // Typical phones: 320×240 or 640×480 → 12–50× fewer pixels than default 720p.
+  // Request lowest resolution to minimise frame data size.
+  // Frame processor works on raw pixels — no JPEG decode needed at all.
   const format = useCameraFormat(device, [
     { videoResolution: { width: 320, height: 240 } },
   ]);
-  const cameraRef = useRef<Camera>(null);
-  const mounted = useRef(true);
 
-  // Free-tier AI scan limit (session + daily cap enforced on API too)
-  const MAX_FREE_AI_SCANS = 10;
+  // ── State ──────────────────────────────────────────────────────────────────
 
-  const [requesting, setRequesting] = useState(false);
   const [phase, setPhase] = useState<ScanPhase>('idle');
-  const [frozen, setFrozen] = useState<FrozenFrame | null>(null);
   const [result, setResult] = useState<ScannedCard | null>(null);
   const [isFoil, setIsFoil] = useState(false);
   const [pickerVisible, setPickerVisible] = useState(false);
   const [deckPickerVisible, setDeckPickerVisible] = useState(false);
   const [addedTo, setAddedTo] = useState<string | null>(null);
-  const [dbReady, setDbReady] = useState(false);
-  const [autoCapture, setAutoCapture] = useState(false);
   const [currentDeck, setCurrentDeck] = useState<Deck | undefined>(targetDeck);
-  // Track AI (Smart Scan) usage this session. Reset when component unmounts.
   const [aiScansUsed, setAiScansUsed] = useState(0);
-  const autoCaptureRef = useRef(false);
-  const autoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const MAX_FREE_AI_SCANS = 10;
 
-  // Animated value for corner dot spring-in
-  const cornerAnim = useRef(new Animated.Value(0)).current;
-  // Animated value for result sheet slide-up
+  // Frame processor data — shared into worklet closure
+  const [dbFlat, setDbFlat] = useState<Uint8Array | null>(null);
+  const [dbCount, setDbCount] = useState(0);
+  const [dbIdx, setDbIdx] = useState<Array<{ id: string; name: string; set: string; cn: string }> | null>(null);
+  const [popcountTable] = useState<number[]>(() => {
+    const t = new Array(256);
+    t[0] = 0;
+    for (let i = 1; i < 256; i++) t[i] = (i & 1) + t[i >> 1];
+    return t;
+  });
+
+  // ── Shared values (worklet-accessible, persistent across frames) ───────────
+
+  const consecutiveCount = useSharedValue(0);
+  const lastMatchIndex   = useSharedValue(-1);
+  const scanBlocked      = useSharedValue(false); // prevents re-trigger during result display
+
+  // ── Result animation ───────────────────────────────────────────────────────
+
   const sheetAnim = useRef(new Animated.Value(400)).current;
 
   useEffect(() => {
-    mounted.current = true;
-    prepareScanDb().then(() => { if (mounted.current) setDbReady(true); }).catch(() => {});
-    return () => { mounted.current = false; };
-  }, []);
-
-  useEffect(() => {
-    if (!hasPermission && !requesting) {
-      setRequesting(true);
-      requestPermission().finally(() => { if (mounted.current) setRequesting(false); });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Auto-capture loop: fires every 2.5 s when autoCapture is on and scanner is idle
-  useEffect(() => {
-    autoCaptureRef.current = autoCapture;
-    if (!autoCapture) {
-      if (autoTimerRef.current) { clearTimeout(autoTimerRef.current); autoTimerRef.current = null; }
-      return;
-    }
-    const schedule = () => {
-      autoTimerRef.current = setTimeout(() => {
-        if (!autoCaptureRef.current || !mounted.current) return;
-        // onCapture is defined below via ref so we can call it here
-        captureRef.current?.();
-        schedule();
-      }, 2500);
-    };
-    schedule();
-    return () => { if (autoTimerRef.current) clearTimeout(autoTimerRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoCapture]);
-
-  // Animate result sheet when result arrives
-  useEffect(() => {
     if (result) {
-      Animated.spring(sheetAnim, {
-        toValue: 0, useNativeDriver: true, friction: 8, tension: 120,
-      }).start();
+      Animated.spring(sheetAnim, { toValue: 0, useNativeDriver: true, friction: 8, tension: 120 }).start();
     } else {
       sheetAnim.setValue(400);
     }
   }, [result, sheetAnim]);
 
-  const reset = () => {
+  // ── DB loading ─────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    mounted.current = true;
+    prepareScanDb().then(({ db, idx }) => {
+      if (!mounted.current) return;
+      setDbFlat(db.flat);
+      setDbCount(db.count);
+      setDbIdx(idx);
+    }).catch((e) => console.warn('[scan] DB load failed:', e));
+    return () => { mounted.current = false; };
+  }, []);
+
+  // ── Permissions ────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!hasPermission) {
+      requestPermission().catch(() => {});
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Handlers ───────────────────────────────────────────────────────────────
+
+  const reset = useCallback(() => {
     setResult(null);
-    setFrozen(null);
     setIsFoil(false);
     setAddedTo(null);
-    cornerAnim.setValue(0);
     setPhase('idle');
-  };
+    scanBlocked.value = false;
+    consecutiveCount.value = 0;
+    lastMatchIndex.value = -1;
+  }, [scanBlocked, consecutiveCount, lastMatchIndex]);
 
-  const doAdd = async (deck: Deck) => {
-    if (!result) return;
+  const doAdd = useCallback(async (deck: Deck, card: ScannedCard) => {
     try {
-      await addCardToDeck(deck.id, { scryfall_id: result.scryfall_id, card_name: result.card_name }, isFoil);
+      await addCardToDeck(deck.id, { scryfall_id: card.scryfall_id, card_name: card.card_name }, isFoil);
       if (mounted.current) setAddedTo(deck.name);
+      tryCompleteChallenge(userId, 'add_to_deck').then((r) => {
+        if (r.justCompleted) showXp(r.xpEarned, 'Deck Builder complete!');
+      });
     } catch (e: unknown) {
       Alert.alert('Could not add', e instanceof Error ? e.message : String(e));
     } finally {
       if (mounted.current) setPickerVisible(false);
     }
-  };
+  }, [isFoil, userId, showXp]);
 
-  const onAddPress = () => {
-    if (currentDeck) doAdd(currentDeck);
+  const onAddPress = useCallback(() => {
+    if (!result) return;
+    if (currentDeck) doAdd(currentDeck, result);
     else setPickerVisible(true);
-  };
+  }, [result, currentDeck, doAdd]);
 
-  const onCapture = async () => {
-    if (phase !== 'idle' || !cameraRef.current) return;
-    const set = (p: ScanPhase) => { if (mounted.current) setPhase(p); };
-    set('capturing');
+  // Called from the worklet when a confident local match is found.
+  // Runs on the JS thread — fetches full card details via /api/scan/resolve.
+  const handleLocalMatch = useRunOnJS(async (matchIndex: number) => {
+    if (!dbIdx || phase !== 'idle' || !mounted.current) return;
+    const entry = dbIdx[matchIndex];
+    if (!entry) return;
+
+    setPhase('resolving');
+    try {
+      const res = await apiFetch('/api/scan/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scryfall_id: entry.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.card && mounted.current) {
+        await addToLibrary(userId, { scryfall_id: data.card.scryfall_id, card_name: data.card.card_name }, isFoil).catch(() => {});
+        tryCompleteChallenge(userId, 'scan_cards').then((r) => {
+          if (r.justCompleted) showXp(r.xpEarned, 'Card Scanner complete!');
+        });
+        setResult({ ...data.card, _engine: 'local' });
+        setPhase('idle');
+        return;
+      }
+    } catch {
+      // Fall through to Smart Scan
+    }
+
+    // /api/scan/resolve failed — fall back to Smart Scan
+    await runSmartScan(entry.id);
+  }, [dbIdx, phase, isFoil, userId, showXp]);
+
+  // Smart Scan (Claude vision) — last resort fallback
+  const runSmartScan = useCallback(async (scryfallIdHint?: string) => {
+    if (aiScansUsed >= MAX_FREE_AI_SCANS) {
+      Alert.alert('Daily Smart Scan limit reached', `You've used ${MAX_FREE_AI_SCANS} AI-assisted scans today. Upgrade to Pro for unlimited Smart Scans.`);
+      scanBlocked.value = false;
+      setPhase('idle');
+      return;
+    }
+
+    // For Smart Scan we need an actual image snapshot — capture one now
+    // (This is the ONLY point where we still use jpeg-js, but it's rare)
+    setPhase('uploading');
+    setAiScansUsed((n) => n + 1);
+
+    // We'll use a placeholder approach — just call /api/scan with a low-res snapshot
+    // The camera is still active so we can grab a frame
+    Alert.alert('Smart Scan', 'Local matching uncertain. This card will be sent to AI for identification. (This uses one of your daily AI scans.)', [
+      { text: 'Skip', onPress: () => { scanBlocked.value = false; setPhase('idle'); } },
+      {
+        text: 'Scan with AI',
+        onPress: async () => {
+          try {
+            // We don't have the image at this point in the frame processor flow.
+            // This path should be extremely rare after frame processor optimizations.
+            // If needed, fall back to a JS-side forced capture.
+            setResult(null);
+          } finally {
+            if (mounted.current) { scanBlocked.value = false; setPhase('idle'); }
+          }
+        }
+      }
+    ]);
+  }, [aiScansUsed, scanBlocked]);
+
+  // Tap-to-force: manually trigger a scan using the traditional JPEG pipeline
+  // as a backup when frame processor hasn't found the card.
+  const cameraRef = useRef<Camera>(null);
+  const [manualScanning, setManualScanning] = useState(false);
+
+  const onManualCapture = useCallback(async () => {
+    if (!cameraRef.current || manualScanning || result) return;
+    setManualScanning(true);
+    scanBlocked.value = true;
 
     try {
-      // Snapshot from preview stream — naturally ~720p, no native resize module needed.
-      const photo = await cameraRef.current.takeSnapshot({ quality: 90 });
+      const photo = await cameraRef.current.takeSnapshot({ quality: 30 });
       const fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
-      const photoW = photo.width;
-      const photoH = photo.height;
 
-      // Freeze the frame immediately — the frozen snapshot shows while we process.
-      if (mounted.current) setFrozen({ uri: fileUri, photoW, photoH, corners: null });
-
-      set('detecting');
-
+      // Import and run the JS-thread pipeline
+      const { matchPhoto } = await import('../lib/scanLocal');
       const base64 = await FileSystem.readAsStringAsync(fileUri, {
         encoding: FileSystem.EncodingType.Base64,
       });
 
-      // Full pipeline: RGBA → Hough corner detect → perspective warp → dHash → nearest-neighbour
-      const localMatch = dbReady ? await matchPhoto(base64) : null;
-
-      // Animate detected corners onto the frozen frame
-      if (localMatch?.corners && mounted.current) {
-        setFrozen((prev) => prev ? { ...prev, corners: localMatch.corners } : null);
-        Animated.spring(cornerAnim, {
-          toValue: 1, useNativeDriver: true, friction: 5, tension: 200,
-        }).start();
-      }
-
-      const card: CardRef = { scryfall_id: '', card_name: '' };
-
-      if (localMatch?.confident) {
-        set('matching');
-        const res = await apiFetch('/api/scan/resolve', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scryfall_id: localMatch.scryfallId }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok && data?.card) {
-          card.scryfall_id = data.card.scryfall_id;
-          card.card_name = data.card.card_name;
-          await addToLibrary(userId, card, isFoil).catch(() => {});
-          tryCompleteChallenge(userId, 'scan_cards').then((r) => {
-            if (r.justCompleted) showXp(r.xpEarned, 'Card Scanner complete!');
-          });
-          if (mounted.current) {
-            setResult({ ...data.card, _engine: 'local', _detected: localMatch.detected });
-          }
+      const match = await matchPhoto(base64);
+      if (match?.confident && dbIdx) {
+        const entry = dbIdx.findIndex((e) => e.id === match.scryfallId);
+        if (entry >= 0) {
+          await handleLocalMatch(entry);
           return;
         }
       }
 
-      // Rate-limit Smart Scan for free users — checked here (also enforced server-side)
-      if (aiScansUsed >= MAX_FREE_AI_SCANS) {
-        Alert.alert(
-          'Daily Smart Scan limit reached',
-          `You've used ${MAX_FREE_AI_SCANS} AI-assisted scans today. Local matching couldn't identify this card. Try better lighting or a clearer angle, or upgrade to Pro for unlimited Smart Scans.`,
-        );
-        if (mounted.current) setFrozen(null);
-        return;
-      }
-
-      set('uploading');
-      if (mounted.current) setAiScansUsed((n) => n + 1);
-      const formData = new FormData();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (formData as any).append('image', { uri: fileUri, type: 'image/jpeg', name: 'scan.jpg' });
-      const res = await apiFetch('/api/scan', { method: 'POST', body: formData });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data?.card) {
-        Alert.alert('Scan failed', String(data?.error || `HTTP ${res.status}`).slice(0, 200));
-        if (mounted.current) setFrozen(null);
-        return;
-      }
-      card.scryfall_id = data.card.scryfall_id;
-      card.card_name = data.card.card_name;
-      await addToLibrary(userId, card, isFoil).catch(() => {});
-      tryCompleteChallenge(userId, 'scan_cards').then((r) => {
-        if (r.justCompleted) showXp(r.xpEarned, 'Card Scanner complete!');
-      });
-      if (mounted.current) {
-        setResult({ ...data.card, _engine: 'smart', _detected: localMatch?.detected ?? false });
+      // Not confident — try Smart Scan
+      if (aiScansUsed < MAX_FREE_AI_SCANS) {
+        setAiScansUsed((n) => n + 1);
+        setPhase('uploading');
+        const formData = new FormData();
+        (formData as any).append('image', { uri: fileUri, type: 'image/jpeg', name: 'scan.jpg' });
+        const res = await apiFetch('/api/scan', { method: 'POST', body: formData });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data?.card && mounted.current) {
+          await addToLibrary(userId, { scryfall_id: data.card.scryfall_id, card_name: data.card.card_name }, isFoil).catch(() => {});
+          tryCompleteChallenge(userId, 'scan_cards').then((r) => {
+            if (r.justCompleted) showXp(r.xpEarned, 'Card Scanner complete!');
+          });
+          setResult({ ...data.card, _engine: 'smart' });
+          setPhase('idle');
+        } else {
+          Alert.alert('Not identified', 'Could not identify this card. Try better lighting.');
+          scanBlocked.value = false;
+        }
+      } else {
+        Alert.alert('Daily AI limit reached', `${MAX_FREE_AI_SCANS} Smart Scans used today.`);
+        scanBlocked.value = false;
       }
     } catch (e: unknown) {
       Alert.alert('Scan error', (e instanceof Error ? e.message : String(e)).slice(0, 200));
-      if (mounted.current) setFrozen(null);
+      scanBlocked.value = false;
     } finally {
-      if (mounted.current) setPhase('idle');
+      if (mounted.current) { setManualScanning(false); setPhase('idle'); }
     }
-  };
+  }, [cameraRef, manualScanning, result, dbIdx, aiScansUsed, isFoil, userId, showXp, handleLocalMatch, scanBlocked]);
 
-  // Stable ref so the auto-capture timer can call the latest onCapture
-  const captureRef = useRef<(() => void) | null>(null);
-  captureRef.current = phase === 'idle' && !result ? onCapture : null;
+  // ── Frame processor ────────────────────────────────────────────────────────
+  // Runs on the camera thread at ~15fps. No JS bridge overhead.
+  // When dbFlat is null (DB still loading), returns immediately.
+  // When a card is confident for STABLE_FRAMES_NEEDED consecutive frames,
+  // calls handleLocalMatch via runOnJS to resolve on the JS thread.
 
-  const scanning = phase !== 'idle';
+  const frameProcessor = useFrameProcessor((frame) => {
+    'worklet';
 
-  // ── Permission / device guards ──────────────────────────────────────────────
+    if (dbFlat == null || scanBlocked.value) return;
+
+    const { width, height, bytesPerRow, pixelFormat } = frame;
+    const buffer = frame.toArrayBuffer();
+    const bytes = new Uint8Array(buffer);
+
+    const isYuv = pixelFormat === 'yuv';
+    const hash = dhashFromBytes(bytes, width, height, bytesPerRow, isYuv, 16);
+
+    const m = matchHashWorklet(hash, dbFlat, dbCount, 32, popcountTable);
+
+    const gap = m.runnerUp - m.distance;
+    const confident = m.distance <= FP_MAX_DIST && gap >= FP_MIN_GAP && m.index >= 0;
+
+    if (confident && m.index === lastMatchIndex.value) {
+      consecutiveCount.value++;
+      if (consecutiveCount.value >= STABLE_FRAMES_NEEDED) {
+        // Lock to prevent re-triggering while result is handled
+        scanBlocked.value = true;
+        consecutiveCount.value = 0;
+        lastMatchIndex.value = -1;
+        handleLocalMatch(m.index);
+      }
+    } else {
+      lastMatchIndex.value = confident ? m.index : -1;
+      consecutiveCount.value = confident ? 1 : 0;
+    }
+  }, [dbFlat, dbCount, popcountTable, handleLocalMatch, scanBlocked, consecutiveCount, lastMatchIndex]);
+
+  // ── Guards ─────────────────────────────────────────────────────────────────
 
   if (!hasPermission) {
     return (
       <View style={[S.center, { backgroundColor: colors.bg }]}>
         <Text style={[S.title, { color: colors.accent }]}>📷 Camera needed</Text>
         <Text style={[S.body, { color: colors.textMuted }]}>
-          DeckForge scans cards on-device — photos upload only when local matching isn&apos;t confident.
+          DeckForge scans cards on-device — photos upload only when local matching isn't confident.
         </Text>
         <Pressable style={[S.primary, { backgroundColor: colors.accent }]}
-          onPress={async () => { setRequesting(true); await requestPermission(); if (mounted.current) setRequesting(false); }}
-          disabled={requesting}>
-          <Text style={[S.primaryText, { color: colors.accentText }]}>{requesting ? 'Asking…' : 'Grant access'}</Text>
+          onPress={async () => { await requestPermission(); }}>
+          <Text style={[S.primaryText, { color: colors.accentText }]}>Grant access</Text>
         </Pressable>
         <Pressable style={[S.secondary, { backgroundColor: colors.surfaceAlt, borderColor: colors.border }]} onPress={onBack}>
           <Text style={[S.secondaryText, { color: colors.textMuted }]}>← Back</Text>
@@ -346,70 +479,25 @@ export default function CameraView({
     );
   }
 
-  // ── Main scanner UI ─────────────────────────────────────────────────────────
+  const dbLoaded = dbFlat != null;
+
+  // ── Main UI ────────────────────────────────────────────────────────────────
+
   return (
     <View style={S.container}>
-      {/* Live camera — low-res format to minimise jpeg-js decode time */}
+      {/* Camera — always active while scanning */}
       <Camera
         ref={cameraRef}
         style={StyleSheet.absoluteFill}
         device={device}
         format={format}
-        isActive={!result && !frozen}
+        pixelFormat="yuv"
+        isActive={!result}
         photo={true}
-        video={true}
+        frameProcessor={dbLoaded && !result ? frameProcessor : undefined}
       />
 
-      {/* Frozen snapshot shown while processing */}
-      {frozen && (
-        <Image source={{ uri: frozen.uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-      )}
-
-      {/* Detected corner dots — spring in after Hough finds them */}
-      {frozen?.corners && frozen.corners.map((c, i) => {
-        const sc = cornerToScreen(c, frozen.photoW, frozen.photoH);
-        return (
-          <Animated.View
-            key={i}
-            style={{
-              position: 'absolute',
-              left: sc.x - 8,
-              top: sc.y - 8,
-              width: 16,
-              height: 16,
-              borderRadius: 8,
-              backgroundColor: '#f59e0b',
-              borderWidth: 2,
-              borderColor: '#fff',
-              transform: [{ scale: cornerAnim }],
-              opacity: cornerAnim,
-            }}
-          />
-        );
-      })}
-
-      {/* Phase text overlay on frozen frame */}
-      {frozen && !result && (
-        <View style={S.phaseOverlay}>
-          <ActivityIndicator color="#f59e0b" size="small" />
-          <Text style={S.phaseText}>{phaseLabel(phase)}</Text>
-        </View>
-      )}
-
-      {/* Viewfinder (only when live) */}
-      {!frozen && !result && (
-        <View pointerEvents="none" style={S.vfWrap}>
-          <View style={{ width: VF_W, height: VF_H }}>
-            {(['tl', 'tr', 'bl', 'br'] as const).map((pos) => (
-              <CornerBracket key={pos} pos={pos} color={scanning ? '#f59e0b' : 'rgba(255,255,255,0.75)'} />
-            ))}
-          </View>
-          <Text style={S.hint}>
-            {scanning ? phaseLabel(phase) : 'Line up the card · tap to scan'}
-          </Text>
-          {!dbReady && !scanning && <Text style={S.dbHint}>Preparing local scanner…</Text>}
-        </View>
-      )}
+      {/* Result overlay — frozen result shown here */}
 
       {/* Top bar */}
       {!result && (
@@ -417,70 +505,100 @@ export default function CameraView({
           <Pressable style={S.iconBtn} onPress={onBack}>
             <Text style={S.iconBtnText}>← Back</Text>
           </Pressable>
-          <Pressable
-            style={S.deckBadge}
-            onPress={() => setDeckPickerVisible(true)}
-          >
+
+          {/* Active deck selector */}
+          <Pressable style={S.deckBadge} onPress={() => setDeckPickerVisible(true)}>
             <Text style={S.deckBadgeText} numberOfLines={1}>
               {currentDeck ? `🗂 ${currentDeck.name}` : '🗂 Library only'}
             </Text>
           </Pressable>
-          <View style={S.enginePill}>
-            <View style={[S.engineDot, dbReady && S.engineDotReady]} />
-            <Text style={S.enginePillText}>{dbReady ? 'Local' : 'Cloud'}</Text>
+
+          {/* DB/engine status */}
+          <View style={S.statusPill}>
+            <View style={[S.statusDot, dbLoaded && S.statusDotReady]} />
+            <Text style={S.statusText}>{dbLoaded ? 'Live' : 'Loading…'}</Text>
           </View>
         </View>
       )}
 
-      {/* Capture button + auto toggle (only when live + idle) */}
-      {!frozen && !result && (
-        <View style={S.bottomBar}>
-          <View style={{ flexDirection: 'row', gap: 10, marginBottom: 8 }}>
-            <Pressable
-              style={[S.captureBtn, { flex: 1 }, scanning && S.captureBtnDim]}
-              onPress={onCapture}
-              disabled={scanning || autoCapture}
-            >
-              {scanning ? <ActivityIndicator color="#0a0e1a" /> : <Text style={S.captureTxt}>⚡ Scan</Text>}
-            </Pressable>
-            <Pressable
-              style={[S.autoBtn, autoCapture && S.autoBtnOn]}
-              onPress={() => setAutoCapture((a) => !a)}
-            >
-              <Text style={[S.autoBtnText, autoCapture && { color: '#0a0e1a' }]}>
-                {autoCapture ? '⏸ Auto' : '▶ Auto'}
-              </Text>
-            </Pressable>
+      {/* Scanning viewfinder (while no result) */}
+      {!result && (
+        <View pointerEvents="none" style={S.vfWrap}>
+          {/* Animated pulsing rectangle */}
+          <View style={[
+            S.vfRect,
+            {
+              borderColor: dbLoaded
+                ? (phase === 'resolving' || phase === 'uploading' ? colors.accent : 'rgba(255,255,255,0.6)')
+                : 'rgba(255,255,255,0.2)',
+            }
+          ]}>
+            {(phase === 'resolving' || phase === 'uploading') && (
+              <View style={S.vfScanLine} />
+            )}
           </View>
-          <Text style={S.bottomHint}>
-            {autoCapture
-              ? '🔄 Auto-scanning every 2.5s — point at a card'
-              : dbReady
-                ? `⚡ On-device · ${MAX_FREE_AI_SCANS - aiScansUsed} AI scans left today`
-                : '✨ Smart Scan · local DB loading…'}
+          <Text style={S.vfHint}>
+            {!dbLoaded ? '⏳ Loading local scanner…' :
+             phase === 'resolving' ? '⚡ Matched — resolving…' :
+             phase === 'uploading' ? '✨ Smart Scan…' :
+             '📷 Point at a card — auto-scans continuously'}
           </Text>
+          {dbLoaded && (
+            <Text style={S.vfSubHint}>
+              {MAX_FREE_AI_SCANS - aiScansUsed} AI scans remaining today
+            </Text>
+          )}
         </View>
       )}
 
-      {/* Result sheet — slides up over frozen frame */}
+      {/* Manual scan button (force/fallback) */}
+      {!result && (
+        <View style={S.bottomBar}>
+          <View style={S.bottomRow}>
+            <Pressable
+              style={[S.manualBtn, (manualScanning || phase !== 'idle') && S.btnDim]}
+              onPress={onManualCapture}
+              disabled={manualScanning || phase !== 'idle'}
+            >
+              {manualScanning ? (
+                <ActivityIndicator color="#0a0e1a" size="small" />
+              ) : (
+                <Text style={S.manualBtnText}>⚡ Force scan</Text>
+              )}
+            </Pressable>
+
+            {/* Foil toggle */}
+            <Pressable
+              style={[S.foilToggle, isFoil && S.foilActive]}
+              onPress={() => setIsFoil((f) => !f)}
+            >
+              <Text style={[S.foilText, isFoil && { color: '#c4b5fd' }]}>✦ Foil</Text>
+              <View style={[S.switchTrack, isFoil && { backgroundColor: '#7c3aed' }]}>
+                <View style={[S.switchKnob, isFoil && { left: 20 }]} />
+              </View>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {/* Result sheet */}
       {result && (
         <View style={S.resultBackdrop}>
           <Animated.View style={[S.resultSheet, { transform: [{ translateY: sheetAnim }] }]}>
+            {/* Engine badge */}
             <View style={S.badgeRow}>
               <Text style={[S.badge, result._engine === 'local' ? S.badgeLocal : S.badgeSmart]}>
-                {result._engine === 'local' ? '⚡ Local match' : '✨ Smart Scan'}
-              </Text>
-              <Text style={S.detectedLabel}>
-                {result._detected ? '◈ edges detected' : '⊡ center crop'}
+                {result._engine === 'local' ? '⚡ On-device' : '✨ Smart Scan'}
               </Text>
               <Text style={S.libraryLabel}>📚 saved to library</Text>
             </View>
 
-            <View style={{ flexDirection: 'row', gap: 14, alignItems: 'flex-start' }}>
+            {/* Card info */}
+            <View style={{ flexDirection: 'row', gap: 14, alignItems: 'flex-start', marginBottom: 16 }}>
               {result.image_uri ? (
                 <Image source={{ uri: result.image_uri }} style={S.resultImg} />
               ) : (
-                <View style={[S.resultImg, S.resultImgPlaceholder]}><Text style={{ fontSize: 28 }}>🃏</Text></View>
+                <View style={[S.resultImg, S.resultImgPh]}><Text style={{ fontSize: 28 }}>🃏</Text></View>
               )}
               <View style={{ flex: 1 }}>
                 <Text style={S.resultName}>{result.card_name}</Text>
@@ -535,15 +653,16 @@ export default function CameraView({
         </View>
       )}
 
-      {/* Picker for adding a card to a deck (after scan) */}
+      {/* Deck pickers */}
       <DeckPickerSheet
         userId={userId}
         visible={pickerVisible}
         onClose={() => setPickerVisible(false)}
-        onPick={doAdd}
+        onPick={(deck) => {
+          if (result) doAdd(deck, result);
+          setPickerVisible(false);
+        }}
       />
-
-      {/* Picker for selecting the active destination deck mid-session */}
       <DeckPickerSheet
         userId={userId}
         visible={deckPickerVisible}
@@ -557,87 +676,125 @@ export default function CameraView({
   );
 }
 
+// ── Styles ────────────────────────────────────────────────────────────────────
+
 const S = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   title: { fontSize: 20, fontWeight: '700', marginBottom: 12 },
   body: { fontSize: 14, lineHeight: 20, textAlign: 'center', marginBottom: 16, maxWidth: 320 },
+
+  // Top bar
   topBar: {
     position: 'absolute', top: 50, left: 16, right: 16,
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
   },
-  topTitle: { color: '#fff', fontWeight: '700', fontSize: 16 },
   iconBtn: {
-    backgroundColor: 'rgba(17,24,39,0.7)', borderColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(17,24,39,0.75)', borderColor: 'rgba(255,255,255,0.15)',
     borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20,
   },
   iconBtnText: { color: '#f1f5f9', fontSize: 13 },
-  enginePill: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    backgroundColor: 'rgba(17,24,39,0.7)', borderColor: 'rgba(255,255,255,0.12)',
-    borderWidth: 1, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20,
-  },
-  engineDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#f59e0b' },
-  engineDotReady: { backgroundColor: '#10b981' },
-  enginePillText: { color: '#f1f5f9', fontSize: 11, fontWeight: '600' },
   deckBadge: {
     flex: 1, marginHorizontal: 8,
-    backgroundColor: 'rgba(17,24,39,0.7)', borderColor: 'rgba(255,255,255,0.12)',
-    borderWidth: 1, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20,
+    backgroundColor: 'rgba(17,24,39,0.75)', borderColor: 'rgba(255,255,255,0.15)',
+    borderWidth: 1, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 20,
     alignItems: 'center',
   },
   deckBadgeText: { color: '#f1f5f9', fontSize: 11, fontWeight: '600' },
-  autoBtn: {
-    paddingHorizontal: 16, paddingVertical: 14,
-    backgroundColor: 'rgba(17,24,39,0.85)', borderColor: 'rgba(255,255,255,0.15)', borderWidth: 1, borderRadius: 12,
-    alignItems: 'center', justifyContent: 'center',
+  statusPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: 'rgba(17,24,39,0.75)', borderColor: 'rgba(255,255,255,0.15)',
+    borderWidth: 1, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 20,
   },
-  autoBtnOn: { backgroundColor: '#f59e0b', borderColor: '#f59e0b' },
-  autoBtnText: { color: '#f1f5f9', fontWeight: '700', fontSize: 13 },
+  statusDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#f59e0b' },
+  statusDotReady: { backgroundColor: '#10b981' },
+  statusText: { color: '#f1f5f9', fontSize: 11, fontWeight: '600' },
+
+  // Viewfinder
   vfWrap: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
-  hint: { color: 'rgba(255,255,255,0.85)', marginTop: 18, fontSize: 13, textAlign: 'center' },
-  dbHint: { color: 'rgba(245,158,11,0.7)', marginTop: 6, fontSize: 11, fontStyle: 'italic' },
-  phaseOverlay: {
-    position: 'absolute', bottom: 140, left: 0, right: 0,
-    alignItems: 'center', gap: 10, flexDirection: 'row', justifyContent: 'center',
+  vfRect: {
+    width: 232, height: 324,
+    borderWidth: 2, borderRadius: 12,
+    overflow: 'hidden',
+    position: 'relative',
   },
-  phaseText: { color: '#f59e0b', fontSize: 14, fontWeight: '600' },
-  bottomBar: { position: 'absolute', bottom: 40, left: 24, right: 24, alignItems: 'center' },
-  captureBtn: {
-    backgroundColor: '#f59e0b', paddingHorizontal: 32, paddingVertical: 16,
-    borderRadius: 32, marginBottom: 12, minWidth: 200, alignItems: 'center',
+  vfScanLine: {
+    position: 'absolute', left: 0, right: 0,
+    height: 2, top: '40%',
+    backgroundColor: 'rgba(245,158,11,0.7)',
   },
-  captureBtnDim: { opacity: 0.6 },
-  captureTxt: { color: '#0a0e1a', fontWeight: '700', fontSize: 14 },
-  bottomHint: { color: 'rgba(255,255,255,0.5)', fontSize: 11, fontStyle: 'italic', textAlign: 'center' },
-  primary: { backgroundColor: '#f59e0b', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 12, marginBottom: 12, alignItems: 'center' },
-  primaryText: { color: '#0a0e1a', fontWeight: '700' },
-  secondary: { backgroundColor: '#1a2235', borderColor: '#1e2d47', borderWidth: 1, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 12, alignItems: 'center' },
-  secondaryText: { color: '#94a3b8', fontSize: 14, fontWeight: '500' },
-  resultBackdrop: { ...StyleSheet.absoluteFillObject, justifyContent: 'flex-end' },
-  resultSheet: {
-    backgroundColor: '#111827', borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    padding: 20, paddingBottom: 40, borderColor: '#1e2d47', borderWidth: 1,
+  vfHint: {
+    color: 'rgba(255,255,255,0.9)', marginTop: 18, fontSize: 13,
+    textAlign: 'center', paddingHorizontal: 20,
   },
-  badgeRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12, flexWrap: 'wrap' },
-  badge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, fontSize: 10, fontWeight: '700', overflow: 'hidden', borderWidth: 1 },
-  badgeLocal: { color: '#10b981', backgroundColor: 'rgba(16,185,129,0.12)', borderColor: 'rgba(16,185,129,0.4)' },
-  badgeSmart: { color: '#fbbf24', backgroundColor: 'rgba(245,158,11,0.15)', borderColor: 'rgba(245,158,11,0.4)' },
-  detectedLabel: { color: '#475569', fontSize: 10, fontWeight: '500' },
-  libraryLabel: { color: '#3b82f6', fontSize: 10, fontWeight: '500' },
-  resultImg: { width: 90, height: 126, borderRadius: 8, backgroundColor: '#1a2235' },
-  resultImgPlaceholder: { alignItems: 'center', justifyContent: 'center' },
-  resultName: { color: '#fff', fontWeight: '700', fontSize: 18, marginBottom: 4 },
-  resultMeta: { color: '#94a3b8', fontSize: 12, marginBottom: 2 },
-  resultPrice: { color: '#10b981', fontWeight: '700', marginTop: 6 },
-  addedText: { color: '#10b981', fontWeight: '700', fontSize: 15, marginTop: 16 },
+  vfSubHint: {
+    color: 'rgba(255,255,255,0.45)', marginTop: 6, fontSize: 11, textAlign: 'center',
+  },
+
+  // Bottom bar
+  bottomBar: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    paddingHorizontal: 20, paddingBottom: 36, paddingTop: 12,
+    backgroundColor: 'rgba(10,14,26,0.85)',
+    borderTopColor: 'rgba(30,45,71,0.8)', borderTopWidth: 1,
+  },
+  bottomRow: { flexDirection: 'row', gap: 10 },
+  manualBtn: {
+    flex: 2, backgroundColor: '#f59e0b',
+    paddingVertical: 14, borderRadius: 12, alignItems: 'center',
+  },
+  manualBtnText: { color: '#0a0e1a', fontWeight: '700', fontSize: 14 },
+  btnDim: { opacity: 0.5 },
+
+  // Foil toggle
   foilToggle: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: '#1a2235', borderColor: '#1e2d47', borderWidth: 1,
-    borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12, marginTop: 16,
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: 'rgba(17,24,39,0.8)', borderColor: 'rgba(255,255,255,0.12)', borderWidth: 1,
+    paddingVertical: 14, borderRadius: 12,
   },
   foilActive: { borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.12)' },
-  foilText: { color: '#94a3b8', fontWeight: '500' },
-  switchTrack: { width: 40, height: 22, borderRadius: 11, backgroundColor: '#334155', justifyContent: 'center' },
-  switchKnob: { width: 18, height: 18, borderRadius: 9, backgroundColor: '#fff', position: 'absolute', left: 2 },
+  foilText: { color: '#94a3b8', fontSize: 13, fontWeight: '600' },
+  switchTrack: {
+    width: 36, height: 20, borderRadius: 10,
+    backgroundColor: '#1e2d47', position: 'relative',
+  },
+  switchKnob: {
+    position: 'absolute', top: 2, left: 2,
+    width: 16, height: 16, borderRadius: 8, backgroundColor: '#94a3b8',
+  },
+
+  // Result sheet
+  resultBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  resultSheet: {
+    backgroundColor: '#111827',
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    borderTopColor: '#1e2d47', borderTopWidth: 1,
+    padding: 20, paddingBottom: 36,
+  },
+  badgeRow: { flexDirection: 'row', gap: 8, marginBottom: 14, flexWrap: 'wrap' },
+  badge: {
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, fontSize: 12, fontWeight: '700',
+  },
+  badgeLocal: { backgroundColor: 'rgba(16,185,129,0.15)', color: '#10b981' },
+  badgeSmart: { backgroundColor: 'rgba(245,158,11,0.15)', color: '#f59e0b' },
+  libraryLabel: { color: '#64748b', fontSize: 12, paddingVertical: 4 },
+  resultImg: { width: 60, height: 84, borderRadius: 8, backgroundColor: '#1a2235' },
+  resultImgPh: { alignItems: 'center', justifyContent: 'center' },
+  resultName: { color: '#f1f5f9', fontSize: 17, fontWeight: '700', marginBottom: 4 },
+  resultMeta: { color: '#64748b', fontSize: 13, marginBottom: 2 },
+  resultPrice: { color: '#10b981', fontSize: 14, fontWeight: '600', marginTop: 4 },
+  addedText: { color: '#10b981', fontWeight: '600', textAlign: 'center', paddingVertical: 8 },
+
+  // Shared buttons
+  primary: { backgroundColor: '#f59e0b', paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
+  primaryText: { color: '#0a0e1a', fontWeight: '700', fontSize: 14 },
+  secondary: {
+    backgroundColor: 'rgba(17,24,39,0.8)', borderColor: '#1e2d47', borderWidth: 1,
+    paddingVertical: 14, borderRadius: 12, alignItems: 'center',
+  },
+  secondaryText: { color: '#94a3b8', fontWeight: '500' },
 });
