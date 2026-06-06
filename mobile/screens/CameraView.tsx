@@ -42,6 +42,10 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+// Bump this string whenever the scanner changes — it's shown on screen so we can
+// confirm which build is actually running on the device (no more guessing).
+const BUILD_TAG = 'standalone-v1';
+
 const FP_MAX_DIST          = 75;
 const FP_MIN_GAP           = 7;
 const STABLE_FRAMES_NEEDED = 5;
@@ -556,7 +560,7 @@ export default function CameraView({
       {!result && (
         <View pointerEvents="none" style={S.diag}>
           <Text style={S.diagText}>
-            DB: {dbLoaded ? `✓ ${dbCount} cards` : '…'}   ·   Auto-scan: {
+            [{BUILD_TAG}]  DB: {dbLoaded ? `✓ ${dbCount} cards` : '…'}   ·   Auto-scan: {
               fpStatus === 'active' ? '✓ working'
               : fpStatus === 'unavailable' ? '✗ needs new build'
               : dbLoaded ? '… waiting for frames' : '…'
