@@ -76,9 +76,13 @@ function dhashFromBytes(
       const x0 = cropX + Math.floor((gx * cropW) / gw);
       const x1 = cropX + Math.max(x0 - cropX + 1, Math.floor(((gx + 1) * cropW) / gw));
       let sum = 0, cnt = 0;
-      for (let fy = y0; fy < y1; fy++) {
+      // Sample ~4×4 points per cell regardless of resolution — keeps the
+      // per-frame cost flat even at 720p.
+      const sx = Math.max(1, Math.floor((x1 - x0) / 4));
+      const sy = Math.max(1, Math.floor((y1 - y0) / 4));
+      for (let fy = y0; fy < y1; fy += sy) {
         const rowBase = fy * bytesPerRow;
-        for (let fx = x0; fx < x1; fx++) {
+        for (let fx = x0; fx < x1; fx += sx) {
           sum += isYuv ? bytes[rowBase + fx]
             : (77 * bytes[rowBase + fx * step] + 150 * bytes[rowBase + fx * step + 1] + 29 * bytes[rowBase + fx * step + 2]) >> 8;
           cnt++;
@@ -117,6 +121,8 @@ function matchHashWorklet(
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+type Engine = 'local' | 'smart';
+
 type ScannedCard = {
   scryfall_id: string;
   card_name: string;
@@ -125,9 +131,10 @@ type ScannedCard = {
   set_name?: string;
   set_code?: string;
   price_eur?: number | null;
+  _engine?: Engine;
 };
 
-type ScanNotif = { type: 'success' | 'warn' | 'error'; text: string; sub?: string };
+type ScanNotif = { type: 'success' | 'warn' | 'error'; text: string; sub?: string; engine?: Engine };
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -148,8 +155,10 @@ export default function CameraView({
   const cameraRef = useRef<Camera>(null);
   const notifTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Crisp preview (720p). The dhash worklet samples with a stride, so its cost
+  // stays bounded regardless of frame resolution — no need to cripple the preview.
   const format = useCameraFormat(device, [
-    { videoResolution: { width: 320, height: 240 } },
+    { videoResolution: { width: 1280, height: 720 } },
   ]);
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -283,11 +292,12 @@ export default function CameraView({
             type: currentDeck ? 'success' : 'warn',
             text: card.card_name,
             sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
+            engine: 'local',
           });
           resetScanner(SCAN_COOLDOWN_MS);
         } else {
           // Review — pause and show sheet
-          setResult(card);
+          setResult({ ...card, _engine: 'local' });
           // scanner stays blocked until user acts
         }
       } else {
@@ -310,6 +320,7 @@ export default function CameraView({
       type: currentDeck ? 'success' : 'warn',
       text: result.card_name,
       sub: `${currentDeck ? `→ ${currentDeck.name}` : '→ Library'}${isFoil ? ' · foil' : ''}`,
+      engine: result._engine,
     });
     setResult(null);
     setIsFoil(false);
@@ -361,12 +372,13 @@ export default function CameraView({
           await doAdd(card, false, currentDeck);
           showNotif({
             type: currentDeck ? 'success' : 'warn',
-            text: `✨ ${card.card_name}`,
+            text: card.card_name,
             sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
+            engine: 'smart',
           });
           resetScanner(SCAN_COOLDOWN_MS);
         } else {
-          setResult(card);
+          setResult({ ...card, _engine: 'smart' });
         }
       } else {
         showNotif({ type: 'error', text: 'Not identified', sub: 'Try better lighting' });
@@ -533,7 +545,9 @@ export default function CameraView({
             {scanNotif.type === 'error' ? '✗' : '✓'} {scanNotif.text}
           </Text>
           {scanNotif.sub && (
-            <Text style={[S.notifSub, { color: NOTIF_C[scanNotif.type].fg }]}>{scanNotif.sub}</Text>
+            <Text style={[S.notifSub, { color: NOTIF_C[scanNotif.type].fg }]}>
+              {scanNotif.engine === 'smart' ? '✨ AI Smart Scan  ·  ' : scanNotif.engine === 'local' ? '⚡ On-device  ·  ' : ''}{scanNotif.sub}
+            </Text>
           )}
         </Animated.View>
       )}
@@ -561,6 +575,9 @@ export default function CameraView({
                 : <View style={[S.cardImg, S.cardImgPh]}><Text style={{ fontSize: 28 }}>🃏</Text></View>
               }
               <View style={{ flex: 1 }}>
+                <Text style={[S.engineBadge, result._engine === 'smart' ? S.engineSmart : S.engineLocal]}>
+                  {result._engine === 'smart' ? '✨ AI Smart Scan' : '⚡ On-device match'}
+                </Text>
                 <Text style={S.cardName}>{result.card_name}</Text>
                 {!!result.type_line && <Text style={S.cardMeta}>{result.type_line}</Text>}
                 {!!result.set_name && (
@@ -703,6 +720,13 @@ const S = StyleSheet.create({
   cardRow: { flexDirection: 'row', gap: 14, marginBottom: 18 },
   cardImg: { width: 64, height: 90, borderRadius: 8, backgroundColor: '#1a2235' },
   cardImgPh: { alignItems: 'center', justifyContent: 'center' },
+  engineBadge: {
+    alignSelf: 'flex-start', fontSize: 11, fontWeight: '700',
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, marginBottom: 6,
+    overflow: 'hidden',
+  },
+  engineLocal: { backgroundColor: 'rgba(16,185,129,0.15)', color: '#10b981' },
+  engineSmart: { backgroundColor: 'rgba(245,158,11,0.15)', color: '#f59e0b' },
   cardName: { color: '#f1f5f9', fontSize: 17, fontWeight: '700', marginBottom: 4 },
   cardMeta: { color: '#64748b', fontSize: 13, marginBottom: 2 },
   cardPrice: { color: '#10b981', fontSize: 14, fontWeight: '600', marginTop: 4 },
