@@ -34,7 +34,7 @@ import { useSharedValue, useRunOnJS } from 'react-native-worklets-core';
 import * as FileSystem from 'expo-file-system/legacy';
 import { apiFetch } from '../lib/api';
 import { addCardToDeck, addToLibrary, type Deck } from '../lib/db';
-import { prepareScanDb } from '../lib/scanLocal';
+import { prepareScanDb, idAt } from '../lib/scanLocal';
 import { useTheme } from '../lib/theme';
 import { tryCompleteChallenge } from '../lib/challenges';
 import { useXpToast } from '../lib/xpToast';
@@ -179,7 +179,7 @@ export default function CameraView({
   // Hash DB
   const [dbFlat, setDbFlat]   = useState<Uint8Array | null>(null);
   const [dbCount, setDbCount] = useState(0);
-  const [dbIdx, setDbIdx]     = useState<Array<{ id: string; name: string; set: string; cn: string }> | null>(null);
+  const [dbIds, setDbIds]     = useState<Uint8Array | null>(null);
   const [popcountTable]       = useState<number[]>(() => {
     const t = new Array(256); t[0] = 0;
     for (let i = 1; i < 256; i++) t[i] = (i & 1) + t[i >> 1];
@@ -223,11 +223,11 @@ export default function CameraView({
 
   useEffect(() => {
     mounted.current = true;
-    prepareScanDb().then(({ db, idx }) => {
+    prepareScanDb().then(({ db, ids }) => {
       if (!mounted.current) return;
       setDbFlat(db.flat);
       setDbCount(db.count);
-      setDbIdx(idx);
+      setDbIds(ids);
     }).catch(e => console.warn('[scan] DB load failed:', e));
     return () => {
       mounted.current = false;
@@ -269,16 +269,16 @@ export default function CameraView({
   // ── Core: resolve a match index to a full card, then act on mode ───────────
 
   const handleLocalMatch = useRunOnJS(async (matchIndex: number) => {
-    if (!dbIdx || !mounted.current) return;
-    const entry = dbIdx[matchIndex];
-    if (!entry) return;
+    if (!dbIds || !mounted.current) return;
+    const scryfallId = idAt(dbIds, matchIndex);
+    if (!scryfallId) return;
 
     setResolving(true);
     try {
       const res = await apiFetch('/api/scan/resolve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scryfall_id: entry.id }),
+        body: JSON.stringify({ scryfall_id: scryfallId }),
       });
       const data = await res.json().catch(() => ({}));
 
@@ -310,7 +310,7 @@ export default function CameraView({
     } finally {
       if (mounted.current) setResolving(false);
     }
-  }, [dbIdx, quickMode, currentDeck, doAdd, showNotif, resetScanner]);
+  }, [dbIds, quickMode, currentDeck, doAdd, showNotif, resetScanner]);
 
   // Review mode: user confirms the card in the sheet
   const onReviewAdd = useCallback(async () => {
@@ -349,9 +349,9 @@ export default function CameraView({
       });
 
       const match = await matchPhoto(base64);
-      if (match?.confident && dbIdx) {
-        const idx = dbIdx.findIndex(e => e.id === match.scryfallId);
-        if (idx >= 0) { await handleLocalMatch(idx); return; }
+      if (match?.confident) {
+        await handleLocalMatch(match.index);
+        return;
       }
 
       // Not confident — try Smart Scan
@@ -390,7 +390,7 @@ export default function CameraView({
     } finally {
       if (mounted.current) setManualScanning(false);
     }
-  }, [cameraRef, manualScanning, resolving, result, dbIdx, aiScansUsed, quickMode, currentDeck, doAdd, showNotif, handleLocalMatch, resetScanner, scanBlocked]);
+  }, [cameraRef, manualScanning, resolving, result, aiScansUsed, quickMode, currentDeck, doAdd, showNotif, handleLocalMatch, resetScanner, scanBlocked]);
 
   // ── Frame processor ────────────────────────────────────────────────────────
 

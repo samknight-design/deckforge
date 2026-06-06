@@ -236,6 +236,19 @@ async function main() {
 
   await writeFile(binPath, blob);
   await writeFile(idxPath, JSON.stringify(finalIdx));
+
+  // Compact id table for the mobile scanner: 8-byte header + 16 bytes per UUID,
+  // parallel to cards.bin. The app loads this instead of the 11 MB idx JSON so
+  // it never has to JSON.parse on the main thread (which froze the UI). The full
+  // idx JSON is still written above for tooling / human inspection.
+  const idsPath = path.join(outDir, 'cards.ids.bin');
+  const idsBlob = Buffer.alloc(8 + count * 16);
+  idsBlob.write('DFID', 0, 4, 'ascii');
+  idsBlob.writeUInt32LE(count, 4);
+  for (let i = 0; i < count; i++) {
+    idsBlob.write(finalIdx[i].id.replace(/-/g, ''), 8 + i * 16, 16, 'hex');
+  }
+  await writeFile(idsPath, idsBlob);
   await writeFile(metaPath, JSON.stringify({
     version: 1,
     builtAt: new Date().toISOString(),

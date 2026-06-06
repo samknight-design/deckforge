@@ -18,17 +18,14 @@ import {
   parseHashDb,
 } from '@deckforge/shared/cardScan';
 
-type IdxEntry = { id: string; name: string; set: string; cn: string };
 type LoadedDb = {
   db: { version: number; count: number; bytesPerHash: number; flat: Uint8Array };
-  idx: IdxEntry[];
+  ids: Uint8Array; // packed cards.ids.bin (8-byte header + 16 bytes per id), parallel to db
 };
 
 export type LocalMatch = {
   scryfallId: string;
-  name: string;
-  set: string;
-  cn: string;
+  index: number;
   distance: number;
   runnerUp: number;
   totalBits: number;
@@ -36,6 +33,16 @@ export type LocalMatch = {
   confident: boolean;
   corners: Array<{x: number; y: number}> | null;
 };
+
+// Format the 16-byte packed UUID at row `i` of cards.ids.bin into the canonical
+// 8-4-4-4-12 string. Header is 8 bytes, then 16 bytes per id.
+export function idAt(ids: Uint8Array, i: number): string | null {
+  const off = 8 + i * 16;
+  if (off + 16 > ids.length) return null;
+  let hex = '';
+  for (let b = 0; b < 16; b++) hex += ids[off + b].toString(16).padStart(2, '0');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 // ── Confidence gates ──────────────────────────────────────────────────────────
 //
@@ -55,29 +62,28 @@ const CROP_MIN_GAP      = 8;    // winner leads runner-up by ≥ 8 bits
 
 let dbPromise: Promise<LoadedDb> | null = null;
 
-// Load + parse the bundled DB once. ~3.5 MB binary + idx JSON.
-// Memoised so subsequent scans are instant (first scan pays the load cost).
+// Load the bundled DB once: ~3.5 MB hashes + ~1.8 MB packed ids. Both are
+// binary (base64-decoded byte slices) — NO JSON.parse, which used to freeze the
+// UI for several seconds parsing an 11 MB index. Memoised so later scans reuse it.
 export function prepareScanDb(): Promise<LoadedDb> {
   if (dbPromise) return dbPromise;
   dbPromise = (async () => {
     const binMod = require('../assets/hashes/cards.bin');
-    const idxMod = require('../assets/hashes/cards.idx');
-    const [binAsset, idxAsset] = await Promise.all([
+    const idsMod = require('../assets/hashes/cards.ids.bin');
+    const [binAsset, idsAsset] = await Promise.all([
       Asset.fromModule(binMod).downloadAsync(),
-      Asset.fromModule(idxMod).downloadAsync(),
+      Asset.fromModule(idsMod).downloadAsync(),
     ]);
 
-    const binB64 = await FileSystem.readAsStringAsync(binAsset.localUri!, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
+    const [binB64, idsB64] = await Promise.all([
+      FileSystem.readAsStringAsync(binAsset.localUri!, { encoding: FileSystem.EncodingType.Base64 }),
+      FileSystem.readAsStringAsync(idsAsset.localUri!, { encoding: FileSystem.EncodingType.Base64 }),
+    ]);
+
     const bytes = new Uint8Array(Buffer.from(binB64, 'base64'));
+    const ids = new Uint8Array(Buffer.from(idsB64, 'base64'));
 
-    const idxText = await FileSystem.readAsStringAsync(idxAsset.localUri!, {
-      encoding: FileSystem.EncodingType.UTF8,
-    });
-    const idx = JSON.parse(idxText) as IdxEntry[];
-
-    return { db: parseHashDb(bytes), idx };
+    return { db: parseHashDb(bytes), ids };
   })();
   return dbPromise;
 }
@@ -86,7 +92,7 @@ export function prepareScanDb(): Promise<LoadedDb> {
 // CRITICAL: pass a low-resolution JPEG (~320×240). jpeg-js is pure JS and
 // decoding large images is the #1 bottleneck. See CameraView for format setup.
 export async function matchPhoto(base64Jpeg: string): Promise<LocalMatch | null> {
-  const { db, idx } = await prepareScanDb();
+  const { db, ids } = await prepareScanDb();
 
   const t0 = Date.now();
   const raw = Buffer.from(base64Jpeg, 'base64');
@@ -103,21 +109,19 @@ export async function matchPhoto(base64Jpeg: string): Promise<LocalMatch | null>
   const m = matchHash(hash, db);
   console.log(`[scan] matchHash ${db.count} cards: ${Date.now() - t2}ms (dist=${m.distance}, gap=${m.runnerUp - m.distance})`);
 
-  const entry = idx[m.index];
-  if (!entry) return null;
+  const scryfallId = idAt(ids, m.index);
+  if (!scryfallId) return null;
 
   const maxDist = detected ? DETECTED_MAX_DIST : CROP_MAX_DIST;
   const minGap  = detected ? DETECTED_MIN_GAP  : CROP_MIN_GAP;
   const gap = m.runnerUp - m.distance;
   const confident = m.distance <= maxDist && gap >= minGap;
 
-  console.log(`[scan] result: ${entry.name} (${entry.set}) — dist=${m.distance}/${maxDist}, gap=${gap}/${minGap}, confident=${confident}`);
+  console.log(`[scan] result: ${scryfallId} — dist=${m.distance}/${maxDist}, gap=${gap}/${minGap}, confident=${confident}`);
 
   return {
-    scryfallId: entry.id,
-    name: entry.name,
-    set: entry.set,
-    cn: entry.cn,
+    scryfallId,
+    index: m.index,
     distance: m.distance,
     runnerUp: m.runnerUp,
     totalBits: m.totalBits,
