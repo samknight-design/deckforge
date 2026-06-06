@@ -161,7 +161,10 @@ async function main() {
   console.log(`Output → ${outDir}`);
   await mkdir(outDir, { recursive: true });
   const binPath = path.join(outDir, 'cards.bin');
-  const idxPath = path.join(outDir, 'cards.idx.json');
+  // .idx (not .idx.json) so the Expo bundler treats it as an ASSET (read at
+  // runtime) instead of inlining the 11 MB JSON into the JS bundle. Content is
+  // still JSON — the mobile loader JSON.parses it.
+  const idxPath = path.join(outDir, 'cards.idx');
   const metaPath = path.join(outDir, 'cards.meta.json');
 
   const existing = incremental ? await loadExisting(idxPath, binPath) : null;

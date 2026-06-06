@@ -1,23 +1,22 @@
-// Real-time card scanner using vision-camera frame processors.
+// Card scanner — two modes toggled from the top bar:
 //
-// Pipeline: raw YUV/RGB frame → luminance extraction → dHash (17×16 grid)
-//           → Hamming nearest-neighbour match in 114k DB
-//           → 5 consecutive confident frames → result
+// QUICK mode  — frame processor auto-identifies and immediately adds to the
+//               selected destination. Flash indicator confirms each scan.
+//               No popup. No foil (add those in the library afterwards).
 //
-// No JPEG encode/decode at all. Frame pixels go directly to dHash on the camera
-// thread (worklet). Typical identification: 200–500ms after card is in view.
-// Falls back to Claude Smart Scan when local match is uncertain.
+// REVIEW mode — frame processor detects the card, then pauses and shows a
+//               sheet so the user can set foil, change destination, and
+//               confirm before the card is added.
 //
-// Key files:
-//   shared/cardScan.js  — dHash + matchHash (JS thread fallback)
-//   mobile/lib/scanLocal.ts — JS thread scan (fallback if frame processor fails)
+// Frame.toArrayBuffer() requires minSdkVersion 26 (set in app.json, EAS
+// rebuild needed). The worklet catches the error safely until then; use
+// Force Scan as the fallback in that case.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Animated,
-  Dimensions,
   Image,
   Pressable,
   StyleSheet,
@@ -34,47 +33,23 @@ import {
 import { useSharedValue, useRunOnJS } from 'react-native-worklets-core';
 import * as FileSystem from 'expo-file-system/legacy';
 import { apiFetch } from '../lib/api';
-import { addCardToDeck, addToLibrary, type Deck, type CardRef } from '../lib/db';
+import { addCardToDeck, addToLibrary, type Deck } from '../lib/db';
 import { prepareScanDb } from '../lib/scanLocal';
 import { useTheme } from '../lib/theme';
 import { tryCompleteChallenge } from '../lib/challenges';
 import { useXpToast } from '../lib/xpToast';
 import DeckPickerSheet from '../components/DeckPickerSheet';
 
-const { width: SW, height: SH } = Dimensions.get('window');
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+const FP_MAX_DIST          = 75;
+const FP_MIN_GAP           = 7;
+const STABLE_FRAMES_NEEDED = 5;
+const SCAN_COOLDOWN_MS     = 2500;
+const MAX_FREE_AI_SCANS    = 10;
 
-type ScanPhase = 'idle' | 'resolving' | 'uploading';
-
-type ScannedCard = {
-  scryfall_id: string;
-  card_name: string;
-  image_uri?: string | null;
-  type_line?: string;
-  set_name?: string;
-  set_code?: string;
-  price_eur?: number | null;
-  _engine: 'local' | 'smart';
-};
-
-// ── Confidence gates (same as scanLocal.ts) ───────────────────────────────────
-
-const FP_MAX_DIST = 75;   // Slightly more lenient in frame processor (no perspective warp)
-const FP_MIN_GAP  = 7;    // Winner must beat runner-up by ≥ 7 bits
-const STABLE_FRAMES_NEEDED = 5; // Consecutive confident frames before triggering
-
-// ── Worklet functions ─────────────────────────────────────────────────────────
-// These are compiled to run on the camera thread. NO external imports.
-// All logic must be self-contained with 'worklet' directive.
-
-function computePopcountTable(): number[] {
-  'worklet';
-  const t: number[] = new Array(256);
-  t[0] = 0;
-  for (let i = 1; i < 256; i++) t[i] = (i & 1) + t[i >> 1];
-  return t;
-}
+// ── Worklet helpers ───────────────────────────────────────────────────────────
+// Run on the camera thread — no external imports, all logic self-contained.
 
 function dhashFromBytes(
   bytes: Uint8Array,
@@ -85,24 +60,15 @@ function dhashFromBytes(
   size: number,
 ): Uint8Array {
   'worklet';
-  // Center-crop to card aspect ratio (63:88 ≈ 0.716)
   const cardAspect = 63 / 88;
   let cropW = frameW;
   let cropH = Math.round(frameW / cardAspect);
-  if (cropH > frameH) {
-    cropH = frameH;
-    cropW = Math.round(frameH * cardAspect);
-  }
+  if (cropH > frameH) { cropH = frameH; cropW = Math.round(frameH * cardAspect); }
   const cropX = Math.floor((frameW - cropW) / 2);
   const cropY = Math.floor((frameH - cropH) / 2);
-
-  const gw = size + 1;
-  const gh = size;
-  // Use plain array — avoids potential typed array allocation issues in older worklet runtimes
+  const gw = size + 1, gh = size;
   const grid: number[] = new Array(gw * gh).fill(0);
-
-  const step = isYuv ? 1 : 4; // YUV: 1 byte per luma value; RGB/RGBA: 4 bytes per pixel
-
+  const step = isYuv ? 1 : 4;
   for (let gy = 0; gy < gh; gy++) {
     const y0 = cropY + Math.floor((gy * cropH) / gh);
     const y1 = cropY + Math.max(y0 - cropY + 1, Math.floor(((gy + 1) * cropH) / gh));
@@ -113,54 +79,35 @@ function dhashFromBytes(
       for (let fy = y0; fy < y1; fy++) {
         const rowBase = fy * bytesPerRow;
         for (let fx = x0; fx < x1; fx++) {
-          let luma: number;
-          if (isYuv) {
-            luma = bytes[rowBase + fx];
-          } else {
-            // RGBA/BGRA: compute luminance from first 3 channels
-            const i = rowBase + fx * step;
-            luma = (77 * bytes[i] + 150 * bytes[i + 1] + 29 * bytes[i + 2]) >> 8;
-          }
-          sum += luma;
+          sum += isYuv ? bytes[rowBase + fx]
+            : (77 * bytes[rowBase + fx * step] + 150 * bytes[rowBase + fx * step + 1] + 29 * bytes[rowBase + fx * step + 2]) >> 8;
           cnt++;
         }
       }
       grid[gy * gw + gx] = cnt > 0 ? sum / cnt : 0;
     }
   }
-
-  const hashBytes = (size * size) >> 3; // 32 bytes for size=16
-  const out = new Uint8Array(hashBytes);
+  const out = new Uint8Array((size * size) >> 3);
   let bit = 0;
-  for (let gy = 0; gy < gh; gy++) {
+  for (let gy = 0; gy < gh; gy++)
     for (let gx = 0; gx < size; gx++) {
-      if (grid[gy * gw + gx] < grid[gy * gw + gx + 1]) {
-        out[bit >> 3] |= (0x80 >> (bit & 7));
-      }
+      if (grid[gy * gw + gx] < grid[gy * gw + gx + 1]) out[bit >> 3] |= (0x80 >> (bit & 7));
       bit++;
     }
-  }
   return out;
 }
 
 function matchHashWorklet(
-  query: Uint8Array,
-  flat: Uint8Array,
-  count: number,
-  bph: number,
-  pc: number[],
+  query: Uint8Array, flat: Uint8Array, count: number, bph: number, pc: number[],
 ): { index: number; distance: number; runnerUp: number } {
   'worklet';
-  let best = bph * 8 + 1;
-  let second = best;
-  let bi = -1;
-
+  let best = bph * 8 + 1, second = best, bi = -1;
   for (let i = 0; i < count; i++) {
     const off = i * bph;
     let dist = 0;
     for (let b = 0; b < bph; b++) {
       dist += pc[query[b] ^ flat[off + b]];
-      if (dist >= best) { dist = best; break; } // early exit
+      if (dist >= best) { dist = best; break; }
     }
     if (dist < best) { second = best; best = dist; bi = i; }
     else if (dist < second) second = dist;
@@ -168,7 +115,21 @@ function matchHashWorklet(
   return { index: bi, distance: best, runnerUp: second };
 }
 
-// ── CameraView component ──────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+type ScannedCard = {
+  scryfall_id: string;
+  card_name: string;
+  image_uri?: string | null;
+  type_line?: string;
+  set_name?: string;
+  set_code?: string;
+  price_eur?: number | null;
+};
+
+type ScanNotif = { type: 'success' | 'warn' | 'error'; text: string; sub?: string };
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 export default function CameraView({
   userId,
@@ -184,46 +145,63 @@ export default function CameraView({
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
   const mounted = useRef(true);
+  const cameraRef = useRef<Camera>(null);
+  const notifTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Request lowest resolution to minimise frame data size.
-  // Frame processor works on raw pixels — no JPEG decode needed at all.
   const format = useCameraFormat(device, [
     { videoResolution: { width: 320, height: 240 } },
   ]);
 
   // ── State ──────────────────────────────────────────────────────────────────
 
-  const [phase, setPhase] = useState<ScanPhase>('idle');
-  const [result, setResult] = useState<ScannedCard | null>(null);
-  const [isFoil, setIsFoil] = useState(false);
-  const [pickerVisible, setPickerVisible] = useState(false);
+  const [quickMode, setQuickMode]           = useState(true);
+  const [resolving, setResolving]           = useState(false);
+  const [manualScanning, setManualScanning] = useState(false);
+  const [isFoil, setIsFoil]                = useState(false);
+  const [currentDeck, setCurrentDeck]       = useState<Deck | undefined>(targetDeck ?? undefined);
+  // deck picker can be opened from top bar (quick) or result sheet (review)
   const [deckPickerVisible, setDeckPickerVisible] = useState(false);
-  const [addedTo, setAddedTo] = useState<string | null>(null);
-  const [currentDeck, setCurrentDeck] = useState<Deck | undefined>(targetDeck);
-  const [aiScansUsed, setAiScansUsed] = useState(0);
-  const MAX_FREE_AI_SCANS = 10;
+  const [aiScansUsed, setAiScansUsed]       = useState(0);
+  // quick mode: flash notification
+  const [scanNotif, setScanNotif]           = useState<ScanNotif | null>(null);
+  // review mode: result sheet
+  const [result, setResult]                 = useState<ScannedCard | null>(null);
 
-  // Frame processor data — shared into worklet closure
-  const [dbFlat, setDbFlat] = useState<Uint8Array | null>(null);
+  // Hash DB
+  const [dbFlat, setDbFlat]   = useState<Uint8Array | null>(null);
   const [dbCount, setDbCount] = useState(0);
-  const [dbIdx, setDbIdx] = useState<Array<{ id: string; name: string; set: string; cn: string }> | null>(null);
-  const [popcountTable] = useState<number[]>(() => {
-    const t = new Array(256);
-    t[0] = 0;
+  const [dbIdx, setDbIdx]     = useState<Array<{ id: string; name: string; set: string; cn: string }> | null>(null);
+  const [popcountTable]       = useState<number[]>(() => {
+    const t = new Array(256); t[0] = 0;
     for (let i = 1; i < 256; i++) t[i] = (i & 1) + t[i >> 1];
     return t;
   });
 
-  // ── Shared values (worklet-accessible, persistent across frames) ───────────
+  // ── Shared values ──────────────────────────────────────────────────────────
 
   const consecutiveCount = useSharedValue(0);
   const lastMatchIndex   = useSharedValue(-1);
-  const scanBlocked      = useSharedValue(false); // prevents re-trigger during result display
+  const scanBlocked      = useSharedValue(false);
 
-  // ── Result animation ───────────────────────────────────────────────────────
+  // ── Notification animation (quick mode) ───────────────────────────────────
 
+  const notifAnim = useRef(new Animated.Value(0)).current;
+
+  const showNotif = useCallback((n: ScanNotif) => {
+    if (notifTimer.current) clearTimeout(notifTimer.current);
+    notifAnim.stopAnimation();
+    notifAnim.setValue(0);
+    setScanNotif(n);
+    Animated.spring(notifAnim, { toValue: 1, useNativeDriver: true, friction: 7, tension: 120 }).start();
+    notifTimer.current = setTimeout(() => {
+      Animated.timing(notifAnim, { toValue: 0, duration: 350, useNativeDriver: true }).start(() => {
+        if (mounted.current) setScanNotif(null);
+      });
+    }, 2200);
+  }, [notifAnim]);
+
+  // Result sheet animation (review mode)
   const sheetAnim = useRef(new Animated.Value(400)).current;
-
   useEffect(() => {
     if (result) {
       Animated.spring(sheetAnim, { toValue: 0, useNativeDriver: true, friction: 8, tension: 120 }).start();
@@ -241,59 +219,52 @@ export default function CameraView({
       setDbFlat(db.flat);
       setDbCount(db.count);
       setDbIdx(idx);
-    }).catch((e) => console.warn('[scan] DB load failed:', e));
-    return () => { mounted.current = false; };
+    }).catch(e => console.warn('[scan] DB load failed:', e));
+    return () => {
+      mounted.current = false;
+      if (notifTimer.current) clearTimeout(notifTimer.current);
+    };
   }, []);
-
-  // ── Permissions ────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!hasPermission) {
-      requestPermission().catch(() => {});
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (!hasPermission) requestPermission().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Handlers ───────────────────────────────────────────────────────────────
+  // ── Helpers ────────────────────────────────────────────────────────────────
 
-  const reset = useCallback(() => {
-    setResult(null);
-    setIsFoil(false);
-    setAddedTo(null);
-    setPhase('idle');
-    scanBlocked.value = false;
-    consecutiveCount.value = 0;
-    lastMatchIndex.value = -1;
+  const resetScanner = useCallback((delayMs = 0) => {
+    const go = () => {
+      if (!mounted.current) return;
+      scanBlocked.value = false;
+      consecutiveCount.value = 0;
+      lastMatchIndex.value = -1;
+    };
+    if (delayMs > 0) setTimeout(go, delayMs);
+    else go();
   }, [scanBlocked, consecutiveCount, lastMatchIndex]);
 
-  const doAdd = useCallback(async (deck: Deck, card: ScannedCard) => {
-    try {
-      await addCardToDeck(deck.id, { scryfall_id: card.scryfall_id, card_name: card.card_name }, isFoil);
-      if (mounted.current) setAddedTo(deck.name);
-      tryCompleteChallenge(userId, 'add_to_deck').then((r) => {
-        if (r.justCompleted) showXp(r.xpEarned, 'Deck Builder complete!');
+  const doAdd = useCallback(async (card: ScannedCard, foil: boolean, deck: Deck | undefined) => {
+    await addToLibrary(userId, { scryfall_id: card.scryfall_id, card_name: card.card_name }, foil).catch(() => {});
+    if (deck) {
+      await addCardToDeck(deck.id, { scryfall_id: card.scryfall_id, card_name: card.card_name }, foil).catch(() => {});
+      tryCompleteChallenge(userId, 'add_to_deck').then(r => {
+        if (r.justCompleted && mounted.current) showXp(r.xpEarned, 'Deck Builder complete!');
       });
-    } catch (e: unknown) {
-      Alert.alert('Could not add', e instanceof Error ? e.message : String(e));
-    } finally {
-      if (mounted.current) setPickerVisible(false);
     }
-  }, [isFoil, userId, showXp]);
+    tryCompleteChallenge(userId, 'scan_cards').then(r => {
+      if (r.justCompleted && mounted.current) showXp(r.xpEarned, 'Card Scanner complete!');
+    });
+  }, [userId, showXp]);
 
-  const onAddPress = useCallback(() => {
-    if (!result) return;
-    if (currentDeck) doAdd(currentDeck, result);
-    else setPickerVisible(true);
-  }, [result, currentDeck, doAdd]);
+  // ── Core: resolve a match index to a full card, then act on mode ───────────
 
-  // Called from the worklet when a confident local match is found.
-  // Runs on the JS thread — fetches full card details via /api/scan/resolve.
   const handleLocalMatch = useRunOnJS(async (matchIndex: number) => {
-    if (!dbIdx || phase !== 'idle' || !mounted.current) return;
+    if (!dbIdx || !mounted.current) return;
     const entry = dbIdx[matchIndex];
     if (!entry) return;
 
-    setPhase('resolving');
+    setResolving(true);
     try {
       const res = await apiFetch('/api/scan/resolve', {
         method: 'POST',
@@ -301,72 +272,66 @@ export default function CameraView({
         body: JSON.stringify({ scryfall_id: entry.id }),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.ok && data?.card && mounted.current) {
-        await addToLibrary(userId, { scryfall_id: data.card.scryfall_id, card_name: data.card.card_name }, isFoil).catch(() => {});
-        tryCompleteChallenge(userId, 'scan_cards').then((r) => {
-          if (r.justCompleted) showXp(r.xpEarned, 'Card Scanner complete!');
-        });
-        setResult({ ...data.card, _engine: 'local' });
-        setPhase('idle');
-        return;
+
+      if (res.ok && data?.card) {
+        const card: ScannedCard = data.card;
+
+        if (quickMode) {
+          // Quick — auto-add immediately, no popup
+          await doAdd(card, false, currentDeck);
+          showNotif({
+            type: currentDeck ? 'success' : 'warn',
+            text: card.card_name,
+            sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
+          });
+          resetScanner(SCAN_COOLDOWN_MS);
+        } else {
+          // Review — pause and show sheet
+          setResult(card);
+          // scanner stays blocked until user acts
+        }
+      } else {
+        showNotif({ type: 'error', text: 'Could not identify', sub: 'Try Force Scan' });
+        resetScanner();
       }
     } catch {
-      // Fall through to Smart Scan
+      showNotif({ type: 'error', text: 'Network error', sub: 'Try again' });
+      resetScanner();
+    } finally {
+      if (mounted.current) setResolving(false);
     }
+  }, [dbIdx, quickMode, currentDeck, doAdd, showNotif, resetScanner]);
 
-    // /api/scan/resolve failed — fall back to Smart Scan
-    await runSmartScan(entry.id);
-  }, [dbIdx, phase, isFoil, userId, showXp]);
+  // Review mode: user confirms the card in the sheet
+  const onReviewAdd = useCallback(async () => {
+    if (!result) return;
+    await doAdd(result, isFoil, currentDeck);
+    showNotif({
+      type: currentDeck ? 'success' : 'warn',
+      text: result.card_name,
+      sub: `${currentDeck ? `→ ${currentDeck.name}` : '→ Library'}${isFoil ? ' · foil' : ''}`,
+    });
+    setResult(null);
+    setIsFoil(false);
+    resetScanner(SCAN_COOLDOWN_MS);
+  }, [result, isFoil, currentDeck, doAdd, showNotif, resetScanner]);
 
-  // Smart Scan (Claude vision) — last resort fallback
-  const runSmartScan = useCallback(async (scryfallIdHint?: string) => {
-    if (aiScansUsed >= MAX_FREE_AI_SCANS) {
-      Alert.alert('Daily Smart Scan limit reached', `You've used ${MAX_FREE_AI_SCANS} AI-assisted scans today. Upgrade to Pro for unlimited Smart Scans.`);
-      scanBlocked.value = false;
-      setPhase('idle');
-      return;
-    }
+  const onReviewRescan = useCallback(() => {
+    setResult(null);
+    setIsFoil(false);
+    resetScanner();
+  }, [resetScanner]);
 
-    // For Smart Scan we need an actual image snapshot — capture one now
-    // (This is the ONLY point where we still use jpeg-js, but it's rare)
-    setPhase('uploading');
-    setAiScansUsed((n) => n + 1);
-
-    // We'll use a placeholder approach — just call /api/scan with a low-res snapshot
-    // The camera is still active so we can grab a frame
-    Alert.alert('Smart Scan', 'Local matching uncertain. This card will be sent to AI for identification. (This uses one of your daily AI scans.)', [
-      { text: 'Skip', onPress: () => { scanBlocked.value = false; setPhase('idle'); } },
-      {
-        text: 'Scan with AI',
-        onPress: async () => {
-          try {
-            // We don't have the image at this point in the frame processor flow.
-            // This path should be extremely rare after frame processor optimizations.
-            // If needed, fall back to a JS-side forced capture.
-            setResult(null);
-          } finally {
-            if (mounted.current) { scanBlocked.value = false; setPhase('idle'); }
-          }
-        }
-      }
-    ]);
-  }, [aiScansUsed, scanBlocked]);
-
-  // Tap-to-force: manually trigger a scan using the traditional JPEG pipeline
-  // as a backup when frame processor hasn't found the card.
-  const cameraRef = useRef<Camera>(null);
-  const [manualScanning, setManualScanning] = useState(false);
+  // ── Force Scan (manual JPEG fallback) ─────────────────────────────────────
 
   const onManualCapture = useCallback(async () => {
-    if (!cameraRef.current || manualScanning || result) return;
+    if (!cameraRef.current || manualScanning || resolving || result) return;
     setManualScanning(true);
     scanBlocked.value = true;
 
     try {
       const photo = await cameraRef.current.takeSnapshot({ quality: 30 });
       const fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
-
-      // Import and run the JS-thread pipeline
       const { matchPhoto } = await import('../lib/scanLocal');
       const base64 = await FileSystem.readAsStringAsync(fileUri, {
         encoding: FileSystem.EncodingType.Base64,
@@ -374,71 +339,66 @@ export default function CameraView({
 
       const match = await matchPhoto(base64);
       if (match?.confident && dbIdx) {
-        const entry = dbIdx.findIndex((e) => e.id === match.scryfallId);
-        if (entry >= 0) {
-          await handleLocalMatch(entry);
-          return;
-        }
+        const idx = dbIdx.findIndex(e => e.id === match.scryfallId);
+        if (idx >= 0) { await handleLocalMatch(idx); return; }
       }
 
       // Not confident — try Smart Scan
-      if (aiScansUsed < MAX_FREE_AI_SCANS) {
-        setAiScansUsed((n) => n + 1);
-        setPhase('uploading');
-        const formData = new FormData();
-        (formData as any).append('image', { uri: fileUri, type: 'image/jpeg', name: 'scan.jpg' });
-        const res = await apiFetch('/api/scan', { method: 'POST', body: formData });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok && data?.card && mounted.current) {
-          await addToLibrary(userId, { scryfall_id: data.card.scryfall_id, card_name: data.card.card_name }, isFoil).catch(() => {});
-          tryCompleteChallenge(userId, 'scan_cards').then((r) => {
-            if (r.justCompleted) showXp(r.xpEarned, 'Card Scanner complete!');
+      if (aiScansUsed >= MAX_FREE_AI_SCANS) {
+        Alert.alert('Daily AI limit reached', `${MAX_FREE_AI_SCANS} Smart Scans used today.`);
+        resetScanner();
+        return;
+      }
+      setAiScansUsed(n => n + 1);
+      const formData = new FormData();
+      (formData as any).append('image', { uri: fileUri, type: 'image/jpeg', name: 'scan.jpg' });
+      const res = await apiFetch('/api/scan', { method: 'POST', body: formData });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok && data?.card) {
+        const card: ScannedCard = data.card;
+        if (quickMode) {
+          await doAdd(card, false, currentDeck);
+          showNotif({
+            type: currentDeck ? 'success' : 'warn',
+            text: `✨ ${card.card_name}`,
+            sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
           });
-          setResult({ ...data.card, _engine: 'smart' });
-          setPhase('idle');
+          resetScanner(SCAN_COOLDOWN_MS);
         } else {
-          Alert.alert('Not identified', 'Could not identify this card. Try better lighting.');
-          scanBlocked.value = false;
+          setResult(card);
         }
       } else {
-        Alert.alert('Daily AI limit reached', `${MAX_FREE_AI_SCANS} Smart Scans used today.`);
-        scanBlocked.value = false;
+        showNotif({ type: 'error', text: 'Not identified', sub: 'Try better lighting' });
+        resetScanner();
       }
     } catch (e: unknown) {
-      Alert.alert('Scan error', (e instanceof Error ? e.message : String(e)).slice(0, 200));
-      scanBlocked.value = false;
+      showNotif({ type: 'error', text: 'Scan error', sub: (e instanceof Error ? e.message : String(e)).slice(0, 80) });
+      resetScanner();
     } finally {
-      if (mounted.current) { setManualScanning(false); setPhase('idle'); }
+      if (mounted.current) setManualScanning(false);
     }
-  }, [cameraRef, manualScanning, result, dbIdx, aiScansUsed, isFoil, userId, showXp, handleLocalMatch, scanBlocked]);
+  }, [cameraRef, manualScanning, resolving, result, dbIdx, aiScansUsed, quickMode, currentDeck, doAdd, showNotif, handleLocalMatch, resetScanner, scanBlocked]);
 
   // ── Frame processor ────────────────────────────────────────────────────────
-  // Runs on the camera thread at ~15fps. No JS bridge overhead.
-  // When dbFlat is null (DB still loading), returns immediately.
-  // When a card is confident for STABLE_FRAMES_NEEDED consecutive frames,
-  // calls handleLocalMatch via runOnJS to resolve on the JS thread.
 
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
-
     if (dbFlat == null || scanBlocked.value) return;
-
     const { width, height, bytesPerRow, pixelFormat } = frame;
-    const buffer = frame.toArrayBuffer();
-    const bytes = new Uint8Array(buffer);
-
-    const isYuv = pixelFormat === 'yuv';
-    const hash = dhashFromBytes(bytes, width, height, bytesPerRow, isYuv, 16);
-
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(frame.toArrayBuffer());
+    } catch {
+      // Requires minSdkVersion 26 — EAS rebuild needed.
+      return;
+    }
+    const hash = dhashFromBytes(bytes, width, height, bytesPerRow, pixelFormat === 'yuv', 16);
     const m = matchHashWorklet(hash, dbFlat, dbCount, 32, popcountTable);
-
-    const gap = m.runnerUp - m.distance;
-    const confident = m.distance <= FP_MAX_DIST && gap >= FP_MIN_GAP && m.index >= 0;
-
+    const confident = m.distance <= FP_MAX_DIST && (m.runnerUp - m.distance) >= FP_MIN_GAP && m.index >= 0;
     if (confident && m.index === lastMatchIndex.value) {
       consecutiveCount.value++;
       if (consecutiveCount.value >= STABLE_FRAMES_NEEDED) {
-        // Lock to prevent re-triggering while result is handled
         scanBlocked.value = true;
         consecutiveCount.value = 0;
         lastMatchIndex.value = -1;
@@ -450,21 +410,22 @@ export default function CameraView({
     }
   }, [dbFlat, dbCount, popcountTable, handleLocalMatch, scanBlocked, consecutiveCount, lastMatchIndex]);
 
-  // ── Guards ─────────────────────────────────────────────────────────────────
+  // ── Permission / device guards ─────────────────────────────────────────────
 
   if (!hasPermission) {
     return (
       <View style={[S.center, { backgroundColor: colors.bg }]}>
         <Text style={[S.title, { color: colors.accent }]}>📷 Camera needed</Text>
         <Text style={[S.body, { color: colors.textMuted }]}>
-          DeckForge scans cards on-device — photos upload only when local matching isn't confident.
+          DeckForge scans cards on-device. Images upload only when local matching isn't confident.
         </Text>
-        <Pressable style={[S.primary, { backgroundColor: colors.accent }]}
-          onPress={async () => { await requestPermission(); }}>
-          <Text style={[S.primaryText, { color: colors.accentText }]}>Grant access</Text>
+        <Pressable style={[S.fullBtn, { backgroundColor: colors.accent }]}
+          onPress={() => requestPermission().catch(() => {})}>
+          <Text style={[S.fullBtnText, { color: colors.accentText }]}>Grant access</Text>
         </Pressable>
-        <Pressable style={[S.secondary, { backgroundColor: colors.surfaceAlt, borderColor: colors.border }]} onPress={onBack}>
-          <Text style={[S.secondaryText, { color: colors.textMuted }]}>← Back</Text>
+        <Pressable style={[S.fullBtn, { backgroundColor: colors.surfaceAlt, borderColor: colors.border, borderWidth: 1, marginTop: 8 }]}
+          onPress={onBack}>
+          <Text style={[S.fullBtnText, { color: colors.textMuted }]}>← Back</Text>
         </Pressable>
       </View>
     );
@@ -480,12 +441,17 @@ export default function CameraView({
   }
 
   const dbLoaded = dbFlat != null;
+  const busy = resolving || manualScanning;
 
-  // ── Main UI ────────────────────────────────────────────────────────────────
+  const NOTIF_C = {
+    success: { bg: 'rgba(16,185,129,0.96)',  fg: '#fff' },
+    warn:    { bg: 'rgba(245,158,11,0.96)',   fg: '#0a0e1a' },
+    error:   { bg: 'rgba(239,68,68,0.96)',    fg: '#fff' },
+  } as const;
 
   return (
     <View style={S.container}>
-      {/* Camera — always active while scanning */}
+      {/* Camera — always active unless we have a review result */}
       <Camera
         ref={cameraRef}
         style={StyleSheet.absoluteFill}
@@ -493,181 +459,156 @@ export default function CameraView({
         format={format}
         pixelFormat="yuv"
         isActive={!result}
-        photo={true}
+        photo
         frameProcessor={dbLoaded && !result ? frameProcessor : undefined}
       />
 
-      {/* Result overlay — frozen result shown here */}
-
-      {/* Top bar */}
+      {/* ── Top bar ─────────────────────────────────────────────────────── */}
       {!result && (
         <View style={S.topBar}>
-          <Pressable style={S.iconBtn} onPress={onBack}>
-            <Text style={S.iconBtnText}>← Back</Text>
+          <Pressable style={S.pill} onPress={onBack}>
+            <Text style={S.pillTxt}>← Back</Text>
           </Pressable>
 
-          {/* Active deck selector */}
-          <Pressable style={S.deckBadge} onPress={() => setDeckPickerVisible(true)}>
-            <Text style={S.deckBadgeText} numberOfLines={1}>
-              {currentDeck ? `🗂 ${currentDeck.name}` : '🗂 Library only'}
+          {/* Destination (quick mode) */}
+          <Pressable style={[S.pill, S.pillFlex]} onPress={() => setDeckPickerVisible(true)}>
+            <Text style={S.pillTxt} numberOfLines={1}>
+              🗂 {currentDeck ? currentDeck.name : 'Library only'}
             </Text>
           </Pressable>
 
-          {/* DB/engine status */}
-          <View style={S.statusPill}>
-            <View style={[S.statusDot, dbLoaded && S.statusDotReady]} />
-            <Text style={S.statusText}>{dbLoaded ? 'Live' : 'Loading…'}</Text>
+          {/* Quick / Review toggle */}
+          <View style={S.modeToggle}>
+            <Pressable
+              style={[S.modeBtn, quickMode && S.modeBtnActive]}
+              onPress={() => setQuickMode(true)}
+            >
+              <Text style={[S.modeTxt, quickMode && S.modeTxtActive]}>⚡ Quick</Text>
+            </Pressable>
+            <Pressable
+              style={[S.modeBtn, !quickMode && S.modeBtnActive]}
+              onPress={() => setQuickMode(false)}
+            >
+              <Text style={[S.modeTxt, !quickMode && S.modeTxtActive]}>👁 Review</Text>
+            </Pressable>
+          </View>
+
+          {/* DB live indicator */}
+          <View style={S.pill}>
+            <View style={[S.dot, dbLoaded && S.dotReady]} />
           </View>
         </View>
       )}
 
-      {/* Scanning viewfinder (while no result) */}
+      {/* ── Viewfinder ──────────────────────────────────────────────────── */}
       {!result && (
         <View pointerEvents="none" style={S.vfWrap}>
-          {/* Animated pulsing rectangle */}
           <View style={[
             S.vfRect,
-            {
-              borderColor: dbLoaded
-                ? (phase === 'resolving' || phase === 'uploading' ? colors.accent : 'rgba(255,255,255,0.6)')
-                : 'rgba(255,255,255,0.2)',
-            }
+            { borderColor: busy ? '#f59e0b' : dbLoaded ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)' },
           ]}>
-            {(phase === 'resolving' || phase === 'uploading') && (
-              <View style={S.vfScanLine} />
-            )}
+            {busy && <View style={S.scanLine} />}
           </View>
           <Text style={S.vfHint}>
-            {!dbLoaded ? '⏳ Loading local scanner…' :
-             phase === 'resolving' ? '⚡ Matched — resolving…' :
-             phase === 'uploading' ? '✨ Smart Scan…' :
-             '📷 Point at a card — auto-scans continuously'}
+            {!dbLoaded ? '⏳ Loading scanner…'
+              : resolving ? '⚡ Matched — saving…'
+              : manualScanning ? '⚡ Scanning…'
+              : quickMode ? '📷 Point at a card — auto-scans'
+              : '📷 Point at a card — will pause for review'}
           </Text>
-          {dbLoaded && (
-            <Text style={S.vfSubHint}>
-              {MAX_FREE_AI_SCANS - aiScansUsed} AI scans remaining today
-            </Text>
-          )}
         </View>
       )}
 
-      {/* Manual scan button (force/fallback) */}
+      {/* ── Quick-mode flash notification ──────────────────────────────── */}
+      {scanNotif && (
+        <Animated.View style={[
+          S.notif,
+          {
+            backgroundColor: NOTIF_C[scanNotif.type].bg,
+            opacity: notifAnim,
+            transform: [{ translateY: notifAnim.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }],
+          },
+        ]}>
+          <Text style={[S.notifTitle, { color: NOTIF_C[scanNotif.type].fg }]} numberOfLines={1}>
+            {scanNotif.type === 'error' ? '✗' : '✓'} {scanNotif.text}
+          </Text>
+          {scanNotif.sub && (
+            <Text style={[S.notifSub, { color: NOTIF_C[scanNotif.type].fg }]}>{scanNotif.sub}</Text>
+          )}
+        </Animated.View>
+      )}
+
+      {/* ── Force scan button (bottom bar, no result) ───────────────────── */}
       {!result && (
         <View style={S.bottomBar}>
-          <View style={S.bottomRow}>
-            <Pressable
-              style={[S.manualBtn, (manualScanning || phase !== 'idle') && S.btnDim]}
-              onPress={onManualCapture}
-              disabled={manualScanning || phase !== 'idle'}
-            >
-              {manualScanning ? (
-                <ActivityIndicator color="#0a0e1a" size="small" />
-              ) : (
-                <Text style={S.manualBtnText}>⚡ Force scan</Text>
-              )}
-            </Pressable>
-
-            {/* Foil toggle */}
-            <Pressable
-              style={[S.foilToggle, isFoil && S.foilActive]}
-              onPress={() => setIsFoil((f) => !f)}
-            >
-              <Text style={[S.foilText, isFoil && { color: '#c4b5fd' }]}>✦ Foil</Text>
-              <View style={[S.switchTrack, isFoil && { backgroundColor: '#7c3aed' }]}>
-                <View style={[S.switchKnob, isFoil && { left: 20 }]} />
-              </View>
-            </Pressable>
-          </View>
+          <Pressable style={[S.forceBtn, busy && S.btnDim]} onPress={onManualCapture} disabled={busy}>
+            {manualScanning
+              ? <ActivityIndicator color="#0a0e1a" size="small" />
+              : <Text style={S.forceTxt}>⚡ Force scan</Text>}
+          </Pressable>
+          <Text style={S.aiHint}>{MAX_FREE_AI_SCANS - aiScansUsed} AI scans remaining today</Text>
         </View>
       )}
 
-      {/* Result sheet */}
+      {/* ── Review mode result sheet ─────────────────────────────────────── */}
       {result && (
-        <View style={S.resultBackdrop}>
-          <Animated.View style={[S.resultSheet, { transform: [{ translateY: sheetAnim }] }]}>
-            {/* Engine badge */}
-            <View style={S.badgeRow}>
-              <Text style={[S.badge, result._engine === 'local' ? S.badgeLocal : S.badgeSmart]}>
-                {result._engine === 'local' ? '⚡ On-device' : '✨ Smart Scan'}
-              </Text>
-              <Text style={S.libraryLabel}>📚 saved to library</Text>
-            </View>
-
-            {/* Card info */}
-            <View style={{ flexDirection: 'row', gap: 14, alignItems: 'flex-start', marginBottom: 16 }}>
-              {result.image_uri ? (
-                <Image source={{ uri: result.image_uri }} style={S.resultImg} />
-              ) : (
-                <View style={[S.resultImg, S.resultImgPh]}><Text style={{ fontSize: 28 }}>🃏</Text></View>
-              )}
+        <View style={S.backdrop}>
+          <Animated.View style={[S.sheet, { transform: [{ translateY: sheetAnim }] }]}>
+            {/* Card info row */}
+            <View style={S.cardRow}>
+              {result.image_uri
+                ? <Image source={{ uri: result.image_uri }} style={S.cardImg} />
+                : <View style={[S.cardImg, S.cardImgPh]}><Text style={{ fontSize: 28 }}>🃏</Text></View>
+              }
               <View style={{ flex: 1 }}>
-                <Text style={S.resultName}>{result.card_name}</Text>
-                {!!result.type_line && <Text style={S.resultMeta}>{result.type_line}</Text>}
+                <Text style={S.cardName}>{result.card_name}</Text>
+                {!!result.type_line && <Text style={S.cardMeta}>{result.type_line}</Text>}
                 {!!result.set_name && (
-                  <Text style={S.resultMeta}>
+                  <Text style={S.cardMeta}>
                     {result.set_name}{result.set_code ? ` · ${result.set_code.toUpperCase()}` : ''}
                   </Text>
                 )}
                 {result.price_eur != null && (
-                  <Text style={S.resultPrice}>{formatPrice(result.price_eur)}</Text>
+                  <Text style={S.cardPrice}>{formatPrice(result.price_eur)}</Text>
                 )}
               </View>
             </View>
 
-            {addedTo ? (
-              <>
-                <Text style={S.addedText}>✓ Added to {addedTo}</Text>
-                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
-                  <Pressable style={[S.secondary, { flex: 1 }]} onPress={onBack}>
-                    <Text style={S.secondaryText}>Done</Text>
-                  </Pressable>
-                  <Pressable style={[S.primary, { flex: 2 }]} onPress={reset}>
-                    <Text style={S.primaryText}>📷 Scan another</Text>
-                  </Pressable>
-                </View>
-              </>
-            ) : (
-              <>
-                <Pressable
-                  style={[S.foilToggle, isFoil && S.foilActive]}
-                  onPress={() => setIsFoil((f) => !f)}
-                >
-                  <Text style={[S.foilText, isFoil && { color: '#c4b5fd' }]}>✦ Foil</Text>
-                  <View style={[S.switchTrack, isFoil && { backgroundColor: '#7c3aed' }]}>
-                    <View style={[S.switchKnob, isFoil && { left: 20 }]} />
-                  </View>
-                </Pressable>
-                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
-                  <Pressable style={[S.secondary, { flex: 1 }]} onPress={reset}>
-                    <Text style={S.secondaryText}>Rescan</Text>
-                  </Pressable>
-                  <Pressable style={[S.primary, { flex: 2 }]} onPress={onAddPress}>
-                    <Text style={S.primaryText}>
-                      {currentDeck ? `+ Add to ${currentDeck.name}` : '+ Add to deck'}
-                    </Text>
-                  </Pressable>
-                </View>
-              </>
-            )}
+            {/* Foil toggle */}
+            <Pressable style={[S.foilRow, isFoil && S.foilRowActive]} onPress={() => setIsFoil(f => !f)}>
+              <Text style={[S.foilLabel, isFoil && S.foilLabelActive]}>✦ Foil printing</Text>
+              <View style={[S.switchTrack, isFoil && S.switchTrackOn]}>
+                <View style={[S.switchKnob, isFoil && S.switchKnobOn]} />
+              </View>
+            </Pressable>
+
+            {/* Destination selector */}
+            <Pressable style={S.destRow} onPress={() => setDeckPickerVisible(true)}>
+              <Text style={S.destLabel}>Adding to</Text>
+              <Text style={S.destValue} numberOfLines={1}>
+                {currentDeck ? currentDeck.name : 'Library only'} ›
+              </Text>
+            </Pressable>
+
+            {/* Actions */}
+            <View style={S.actionRow}>
+              <Pressable style={S.rescanBtn} onPress={onReviewRescan}>
+                <Text style={S.rescanTxt}>Rescan</Text>
+              </Pressable>
+              <Pressable style={S.addBtn} onPress={onReviewAdd}>
+                <Text style={S.addTxt}>Add card</Text>
+              </Pressable>
+            </View>
           </Animated.View>
         </View>
       )}
 
-      {/* Deck pickers */}
-      <DeckPickerSheet
-        userId={userId}
-        visible={pickerVisible}
-        onClose={() => setPickerVisible(false)}
-        onPick={(deck) => {
-          if (result) doAdd(deck, result);
-          setPickerVisible(false);
-        }}
-      />
+      {/* Deck picker — used from top bar (quick) and result sheet (review) */}
       <DeckPickerSheet
         userId={userId}
         visible={deckPickerVisible}
         onClose={() => setDeckPickerVisible(false)}
-        onPick={(deck) => {
+        onPick={deck => {
           setCurrentDeck(deck);
           setDeckPickerVisible(false);
         }}
@@ -683,118 +624,118 @@ const S = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   title: { fontSize: 20, fontWeight: '700', marginBottom: 12 },
   body: { fontSize: 14, lineHeight: 20, textAlign: 'center', marginBottom: 16, maxWidth: 320 },
+  fullBtn: { paddingVertical: 14, borderRadius: 12, alignItems: 'center', width: '100%', maxWidth: 280 },
+  fullBtnText: { fontWeight: '700', fontSize: 14 },
 
   // Top bar
   topBar: {
-    position: 'absolute', top: 50, left: 16, right: 16,
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    position: 'absolute', top: 50, left: 12, right: 12,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
   },
-  iconBtn: {
-    backgroundColor: 'rgba(17,24,39,0.75)', borderColor: 'rgba(255,255,255,0.15)',
-    borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20,
-  },
-  iconBtnText: { color: '#f1f5f9', fontSize: 13 },
-  deckBadge: {
-    flex: 1, marginHorizontal: 8,
-    backgroundColor: 'rgba(17,24,39,0.75)', borderColor: 'rgba(255,255,255,0.15)',
-    borderWidth: 1, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 20,
-    alignItems: 'center',
-  },
-  deckBadgeText: { color: '#f1f5f9', fontSize: 11, fontWeight: '600' },
-  statusPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    backgroundColor: 'rgba(17,24,39,0.75)', borderColor: 'rgba(255,255,255,0.15)',
+  pill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: 'rgba(17,24,39,0.82)', borderColor: 'rgba(255,255,255,0.14)',
     borderWidth: 1, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 20,
   },
-  statusDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#f59e0b' },
-  statusDotReady: { backgroundColor: '#10b981' },
-  statusText: { color: '#f1f5f9', fontSize: 11, fontWeight: '600' },
+  pillFlex: { flex: 1 },
+  pillTxt: { color: '#f1f5f9', fontSize: 11, fontWeight: '600' },
+
+  // Mode toggle
+  modeToggle: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(17,24,39,0.82)', borderColor: 'rgba(255,255,255,0.14)',
+    borderWidth: 1, borderRadius: 20, overflow: 'hidden',
+  },
+  modeBtn: { paddingHorizontal: 10, paddingVertical: 7 },
+  modeBtnActive: { backgroundColor: 'rgba(245,158,11,0.25)' },
+  modeTxt: { color: 'rgba(255,255,255,0.45)', fontSize: 11, fontWeight: '600' },
+  modeTxtActive: { color: '#f59e0b' },
+
+  dot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#f59e0b' },
+  dotReady: { backgroundColor: '#10b981' },
 
   // Viewfinder
   vfWrap: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
-  vfRect: {
-    width: 232, height: 324,
-    borderWidth: 2, borderRadius: 12,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  vfScanLine: {
-    position: 'absolute', left: 0, right: 0,
-    height: 2, top: '40%',
+  vfRect: { width: 232, height: 324, borderWidth: 2, borderRadius: 12, overflow: 'hidden' },
+  scanLine: {
+    position: 'absolute', left: 0, right: 0, height: 2, top: '40%',
     backgroundColor: 'rgba(245,158,11,0.7)',
   },
   vfHint: {
-    color: 'rgba(255,255,255,0.9)', marginTop: 18, fontSize: 13,
+    color: 'rgba(255,255,255,0.88)', marginTop: 18, fontSize: 13,
     textAlign: 'center', paddingHorizontal: 20,
   },
-  vfSubHint: {
-    color: 'rgba(255,255,255,0.45)', marginTop: 6, fontSize: 11, textAlign: 'center',
+
+  // Flash notification
+  notif: {
+    position: 'absolute', bottom: 110, left: 20, right: 20,
+    borderRadius: 14, paddingHorizontal: 18, paddingVertical: 13,
+    alignItems: 'center', elevation: 8,
+    shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 4 },
   },
+  notifTitle: { fontSize: 15, fontWeight: '700', textAlign: 'center' },
+  notifSub: { fontSize: 12, fontWeight: '500', marginTop: 3, opacity: 0.88 },
 
   // Bottom bar
   bottomBar: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
-    paddingHorizontal: 20, paddingBottom: 36, paddingTop: 12,
-    backgroundColor: 'rgba(10,14,26,0.85)',
+    paddingHorizontal: 20, paddingBottom: 36, paddingTop: 14,
+    backgroundColor: 'rgba(10,14,26,0.88)',
     borderTopColor: 'rgba(30,45,71,0.8)', borderTopWidth: 1,
+    alignItems: 'center', gap: 8,
   },
-  bottomRow: { flexDirection: 'row', gap: 10 },
-  manualBtn: {
-    flex: 2, backgroundColor: '#f59e0b',
+  forceBtn: {
+    width: '100%', backgroundColor: '#f59e0b',
     paddingVertical: 14, borderRadius: 12, alignItems: 'center',
   },
-  manualBtnText: { color: '#0a0e1a', fontWeight: '700', fontSize: 14 },
-  btnDim: { opacity: 0.5 },
+  forceTxt: { color: '#0a0e1a', fontWeight: '700', fontSize: 14 },
+  btnDim: { opacity: 0.45 },
+  aiHint: { color: 'rgba(255,255,255,0.38)', fontSize: 11 },
 
-  // Foil toggle
-  foilToggle: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    backgroundColor: 'rgba(17,24,39,0.8)', borderColor: 'rgba(255,255,255,0.12)', borderWidth: 1,
-    paddingVertical: 14, borderRadius: 12,
-  },
-  foilActive: { borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.12)' },
-  foilText: { color: '#94a3b8', fontSize: 13, fontWeight: '600' },
-  switchTrack: {
-    width: 36, height: 20, borderRadius: 10,
-    backgroundColor: '#1e2d47', position: 'relative',
-  },
-  switchKnob: {
-    position: 'absolute', top: 2, left: 2,
-    width: 16, height: 16, borderRadius: 8, backgroundColor: '#94a3b8',
-  },
-
-  // Result sheet
-  resultBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0,0,0,0.5)',
-  },
-  resultSheet: {
+  // Review sheet
+  backdrop: { ...StyleSheet.absoluteFillObject, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
+  sheet: {
     backgroundColor: '#111827',
     borderTopLeftRadius: 24, borderTopRightRadius: 24,
     borderTopColor: '#1e2d47', borderTopWidth: 1,
-    padding: 20, paddingBottom: 36,
+    padding: 20, paddingBottom: 40,
   },
-  badgeRow: { flexDirection: 'row', gap: 8, marginBottom: 14, flexWrap: 'wrap' },
-  badge: {
-    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, fontSize: 12, fontWeight: '700',
-  },
-  badgeLocal: { backgroundColor: 'rgba(16,185,129,0.15)', color: '#10b981' },
-  badgeSmart: { backgroundColor: 'rgba(245,158,11,0.15)', color: '#f59e0b' },
-  libraryLabel: { color: '#64748b', fontSize: 12, paddingVertical: 4 },
-  resultImg: { width: 60, height: 84, borderRadius: 8, backgroundColor: '#1a2235' },
-  resultImgPh: { alignItems: 'center', justifyContent: 'center' },
-  resultName: { color: '#f1f5f9', fontSize: 17, fontWeight: '700', marginBottom: 4 },
-  resultMeta: { color: '#64748b', fontSize: 13, marginBottom: 2 },
-  resultPrice: { color: '#10b981', fontSize: 14, fontWeight: '600', marginTop: 4 },
-  addedText: { color: '#10b981', fontWeight: '600', textAlign: 'center', paddingVertical: 8 },
+  cardRow: { flexDirection: 'row', gap: 14, marginBottom: 18 },
+  cardImg: { width: 64, height: 90, borderRadius: 8, backgroundColor: '#1a2235' },
+  cardImgPh: { alignItems: 'center', justifyContent: 'center' },
+  cardName: { color: '#f1f5f9', fontSize: 17, fontWeight: '700', marginBottom: 4 },
+  cardMeta: { color: '#64748b', fontSize: 13, marginBottom: 2 },
+  cardPrice: { color: '#10b981', fontSize: 14, fontWeight: '600', marginTop: 4 },
 
-  // Shared buttons
-  primary: { backgroundColor: '#f59e0b', paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
-  primaryText: { color: '#0a0e1a', fontWeight: '700', fontSize: 14 },
-  secondary: {
-    backgroundColor: 'rgba(17,24,39,0.8)', borderColor: '#1e2d47', borderWidth: 1,
+  foilRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#1a2235', borderRadius: 12,
+    paddingHorizontal: 16, paddingVertical: 13, marginBottom: 10,
+    borderWidth: 1, borderColor: '#1e2d47',
+  },
+  foilRowActive: { borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.1)' },
+  foilLabel: { color: '#94a3b8', fontSize: 14, fontWeight: '600' },
+  foilLabelActive: { color: '#c4b5fd' },
+  switchTrack: { width: 40, height: 22, borderRadius: 11, backgroundColor: '#1e2d47', position: 'relative' },
+  switchTrackOn: { backgroundColor: '#7c3aed' },
+  switchKnob: { position: 'absolute', top: 3, left: 3, width: 16, height: 16, borderRadius: 8, backgroundColor: '#64748b' },
+  switchKnobOn: { left: 21, backgroundColor: '#fff' },
+
+  destRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#1a2235', borderRadius: 12,
+    paddingHorizontal: 16, paddingVertical: 13, marginBottom: 18,
+    borderWidth: 1, borderColor: '#1e2d47',
+  },
+  destLabel: { color: '#64748b', fontSize: 13 },
+  destValue: { color: '#f1f5f9', fontSize: 14, fontWeight: '600', flex: 1, textAlign: 'right' },
+
+  actionRow: { flexDirection: 'row', gap: 10 },
+  rescanBtn: {
+    flex: 1, backgroundColor: '#1a2235', borderColor: '#1e2d47', borderWidth: 1,
     paddingVertical: 14, borderRadius: 12, alignItems: 'center',
   },
-  secondaryText: { color: '#94a3b8', fontWeight: '500' },
+  rescanTxt: { color: '#94a3b8', fontWeight: '600' },
+  addBtn: { flex: 2, backgroundColor: '#f59e0b', paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
+  addTxt: { color: '#0a0e1a', fontWeight: '700', fontSize: 15 },
 });

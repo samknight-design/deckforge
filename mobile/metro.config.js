@@ -17,4 +17,10 @@ const config = getDefaultConfig(projectRoot);
 // Append the workspace root to whatever Expo already watches.
 config.watchFolders = [...(config.watchFolders || []), workspaceRoot];
 
+// Treat the bundled hash DB files as ASSETS (resolved to a local file URI and
+// read at runtime) rather than source modules. Without this, require()-ing
+// cards.idx would try to parse it as JS, and the 14 MB DB would be inlined
+// into the JS bundle, bloating cold start.
+config.resolver.assetExts.push('bin', 'idx');
+
 module.exports = config;

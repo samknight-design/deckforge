@@ -8,6 +8,7 @@
     "./tiers": "./tiers.js",
     "./brackets": "./brackets.js",
     "./currency": "./currency.js",
-    "./deckUtils": "./deckUtils.js"
+    "./deckUtils": "./deckUtils.js",
+    "./cardScan": "./cardScan.js"
   }
 }

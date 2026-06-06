@@ -17,6 +17,7 @@
     },
     "android": {
       "package": "app.deckforge",
+      "minSdkVersion": 26,
       "permissions": [
         "android.permission.CAMERA"
       ],
