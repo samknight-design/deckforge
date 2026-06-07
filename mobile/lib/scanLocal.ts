@@ -21,7 +21,8 @@ import {
 
 type LoadedDb = {
   db: { version: number; count: number; bytesPerHash: number; flat: Uint8Array };
-  ids: Uint8Array; // packed cards.ids.bin (8-byte header + 16 bytes per id), parallel to db
+  ids: Uint8Array;   // packed cards.ids.bin (8-byte header + 16 bytes per id), parallel to db
+  names: Uint8Array; // packed cards.names.bin ("DFNM" + count + offset table + utf8 blob)
 };
 
 export type LocalMatch = {
@@ -43,6 +44,21 @@ export function idAt(ids: Uint8Array, i: number): string | null {
   let hex = '';
   for (let b = 0; b < 16; b++) hex += ids[off + b].toString(16).padStart(2, '0');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// Read the card name at row `i` from cards.names.bin (header 8B + (count+1) uint32
+// offsets + utf8 blob). Lets a confident match auto-add + toast with NO network.
+export function nameAt(names: Uint8Array, i: number): string | null {
+  if (!names || names.length < 8) return null;
+  const dv = new DataView(names.buffer, names.byteOffset, names.byteLength);
+  const count = dv.getUint32(4, true);
+  if (i < 0 || i >= count) return null;
+  const tableBase = 8;
+  const blobStart = tableBase + (count + 1) * 4;
+  const start = dv.getUint32(tableBase + i * 4, true) + blobStart;
+  const end = dv.getUint32(tableBase + (i + 1) * 4, true) + blobStart;
+  if (end > names.length || start > end) return null;
+  return Buffer.from(names.subarray(start, end)).toString('utf8');
 }
 
 // ── Confidence gates ──────────────────────────────────────────────────────────
@@ -95,19 +111,22 @@ export function prepareScanDb(onStage?: (s: string) => void): Promise<LoadedDb> 
     onStage?.('Locating database…');
     const binMod = require('../assets/hashes/cards.bin');
     const idsMod = require('../assets/hashes/cards.ids.bin');
-    const [binAsset, idsAsset] = await Promise.all([
+    const namesMod = require('../assets/hashes/cards.names.bin');
+    const [binAsset, idsAsset, namesAsset] = await Promise.all([
       Asset.fromModule(binMod).downloadAsync(),
       Asset.fromModule(idsMod).downloadAsync(),
+      Asset.fromModule(namesMod).downloadAsync(),
     ]);
 
     onStage?.('Reading hashes…');
     const bytes = await readBytes(binAsset.localUri!);
     onStage?.('Reading card index…');
     const ids = await readBytes(idsAsset.localUri!);
+    const names = await readBytes(namesAsset.localUri!);
 
     const parsed = parseHashDb(bytes);
     onStage?.(`Ready · ${parsed.count} cards · ${Date.now() - t0}ms · ${dbReadMethod}`);
-    return { db: parsed, ids };
+    return { db: parsed, ids, names };
   })();
   // On failure, clear the memo so the next attempt can retry instead of caching the rejection.
   dbPromise.catch(() => { dbPromise = null; });

@@ -31,10 +31,25 @@ import {
   useFrameProcessor,
 } from 'react-native-vision-camera';
 import { useSharedValue, useRunOnJS } from 'react-native-worklets-core';
+import { useResizePlugin } from 'vision-camera-resize-plugin';
+import {
+  OpenCV,
+  ObjectType,
+  DataTypes,
+  ColorConversionCodes,
+  RetrievalModes,
+  ContourApproximationModes,
+  InterpolationFlags,
+  DecompTypes,
+  BorderTypes,
+} from 'react-native-fast-opencv';
+import * as Haptics from 'expo-haptics';
 import * as FileSystem from 'expo-file-system/legacy';
 import { apiFetch } from '../lib/api';
 import { addCardToDeck, addToLibrary, type Deck } from '../lib/db';
-import { prepareScanDb, idAt } from '../lib/scanLocal';
+import { prepareScanDb, idAt, nameAt } from '../lib/scanLocal';
+import { dhashGray, reversed } from '../lib/scanOpenCV';
+import { matchHash } from '@deckforge/shared/cardScan';
 import { useTheme } from '../lib/theme';
 import { tryCompleteChallenge } from '../lib/challenges';
 import { useXpToast } from '../lib/xpToast';
@@ -44,19 +59,28 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'opencv-v4';
+const BUILD_TAG = 'opencv-v5';
 
-// Continuous on-camera auto-scan is OFF for now: the old per-frame matcher runs
-// the full 114k comparison on EVERY frame and freezes the phone. The accurate
-// OpenCV pipeline runs on the Force Scan button instead. Step 2 will build a
-// performant continuous version and flip this back on.
-const LIVE_AUTOSCAN = false;
+// Continuous auto-scan: native OpenCV detects + flattens the card every (throttled)
+// frame on the camera thread; the heavy 114k match runs once on the JS thread only
+// when a card is held steady. No snapshot, no per-frame full-DB scan, no freeze.
+const LIVE_AUTOSCAN = true;
 
-const FP_MAX_DIST          = 75;
-const FP_MIN_GAP           = 7;
-const STABLE_FRAMES_NEEDED = 5;
-const SCAN_COOLDOWN_MS     = 2500;
+// dist ≤ this counts as a confident match. gap is NOT used — reprints share
+// artwork, so the runner-up is often another printing of the SAME card (gap≈0).
+const AUTO_MAX_DIST        = 72;
+const STABLE_FRAMES_NEEDED = 3;     // card centroid steady this many detections → lock
+const FRAME_THROTTLE       = 3;     // run the detector every Nth frame
+const SCAN_COOLDOWN_MS     = 1500;  // pause after a hit before re-arming
 const MAX_FREE_AI_SCANS    = 10;
+
+// Live OpenCV processing + warp geometry
+const PROC_LONG     = 480;          // detection resolution (long side)
+const WARP_W        = 146;          // warped card size fed to the matcher
+const WARP_H        = 204;
+const MIN_AREA_FRAC = 0.12;         // card quad must cover ≥12% of the frame
+const ASPECT_LO     = 0.55;         // card ratio 63/88 ≈ 0.716
+const ASPECT_HI     = 0.92;
 
 // ── Worklet helpers ───────────────────────────────────────────────────────────
 // Run on the camera thread — no external imports, all logic self-contained.
@@ -129,6 +153,34 @@ function matchHashWorklet(
   return { index: bi, distance: best, runnerUp: second };
 }
 
+type Pt = { x: number; y: number };
+
+function hypotW(a: Pt, b: Pt): number {
+  'worklet';
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// Order 4 points to [tl,tr,br,bl] and force a portrait mapping so a sideways card
+// still warps upright. 180° ambiguity is handled by matching both ends later.
+function orderQuadPortraitW(pts: Pt[]): Pt[] {
+  'worklet';
+  let tl = pts[0], tr = pts[0], br = pts[0], bl = pts[0];
+  let minS = 1e18, maxS = -1e18, minD = 1e18, maxD = -1e18;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i]; const s = p.x + p.y, d = p.x - p.y;
+    if (s < minS) { minS = s; tl = p; }
+    if (s > maxS) { maxS = s; br = p; }
+    if (d > maxD) { maxD = d; tr = p; }
+    if (d < minD) { minD = d; bl = p; }
+  }
+  let ord = [tl, tr, br, bl];
+  const w = (hypotW(ord[0], ord[1]) + hypotW(ord[3], ord[2])) / 2;
+  const h = (hypotW(ord[0], ord[3]) + hypotW(ord[1], ord[2])) / 2;
+  if (w > h) ord = [ord[1], ord[2], ord[3], ord[0]];
+  return ord;
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type Engine = 'local' | 'smart';
@@ -178,6 +230,9 @@ export default function CameraView({
     { videoResolution: { width: 1280, height: 720 } },
   ]);
 
+  // Pulls frame pixels into a resized buffer inside the worklet (no snapshot).
+  const { resize } = useResizePlugin();
+
   // ── State ──────────────────────────────────────────────────────────────────
 
   const [quickMode, setQuickMode]           = useState(true);
@@ -197,6 +252,7 @@ export default function CameraView({
   const [dbFlat, setDbFlat]   = useState<Uint8Array | null>(null);
   const [dbCount, setDbCount] = useState(0);
   const [dbIds, setDbIds]     = useState<Uint8Array | null>(null);
+  const [dbNames, setDbNames] = useState<Uint8Array | null>(null);
 
   // On-screen diagnostics (the user can't read Metro logs)
   const [loadStage, setLoadStage] = useState('Starting…');
@@ -220,7 +276,12 @@ export default function CameraView({
   const lastMatchIndex   = useSharedValue(-1);
   const scanBlocked      = useSharedValue(false);
   const fpReported       = useSharedValue(false); // report fp health to JS only once
-  const frameTick        = useSharedValue(0);     // throttles the live match readout
+  const fpErrReported    = useSharedValue(false); // report a worklet error only once
+  const frameTick        = useSharedValue(0);     // throttle counter
+  const dbReady          = useSharedValue(false);  // gate (avoids capturing 3.5MB in the worklet)
+  const lastCx           = useSharedValue(0);      // last detected card centroid (stability)
+  const lastCy           = useSharedValue(0);
+  const stableCount      = useSharedValue(0);      // consecutive steady detections
 
   // Called from the worklet (once) to report whether raw-pixel access works.
   const reportFp = useRunOnJS((ok: boolean) => {
@@ -232,6 +293,11 @@ export default function CameraView({
     if (!mounted.current) return;
     setLiveDist(dist);
     setLiveGap(gap);
+  }, []);
+
+  // Called once if the live OpenCV worklet throws — surfaced so we can see it.
+  const onFpError = useRunOnJS((msg: string) => {
+    if (mounted.current) Alert.alert('Live scan error', msg.slice(0, 300));
   }, []);
 
   // ── Notification animation (quick mode) ───────────────────────────────────
@@ -266,11 +332,13 @@ export default function CameraView({
   useEffect(() => {
     mounted.current = true;
     prepareScanDb((s) => { if (mounted.current) setLoadStage(s); })
-      .then(({ db, ids }) => {
+      .then(({ db, ids, names }) => {
         if (!mounted.current) return;
         setDbFlat(db.flat);
         setDbCount(db.count);
         setDbIds(ids);
+        setDbNames(names);
+        dbReady.value = true;
       })
       .catch((e) => {
         console.warn('[scan] DB load failed:', e);
@@ -358,6 +426,49 @@ export default function CameraView({
       if (mounted.current) setResolving(false);
     }
   }, [dbIds, quickMode, currentDeck, doAdd, showNotif, resetScanner]);
+
+  // Called from the worklet when a steady card has been detected + flattened.
+  // Runs the 114k match on the JS thread (fast, off the camera thread), then
+  // auto-adds (quick) or opens the review sheet — using LOCAL names, NO network.
+  const onWarpedCard = useRunOnJS(async (buf: Uint8Array, w: number, h: number) => {
+    if (!dbFlat || !dbIds || !mounted.current) { scanBlocked.value = false; return; }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    const db = { count: dbCount, bytesPerHash: 32, flat: dbFlat };
+    const m0 = matchHash(dhashGray(buf, w, h), db);
+    const m180 = matchHash(dhashGray(reversed(buf), w, h), db);
+    const m = m180.distance < m0.distance ? m180 : m0;
+    setLiveDist(m.distance); setLiveGap(m.runnerUp - m.distance);
+
+    if (m.distance > AUTO_MAX_DIST) { resetScanner(500); return; } // unsure → keep scanning
+
+    const id = idAt(dbIds, m.index);
+    const nm = (dbNames && nameAt(dbNames, m.index)) || 'Card';
+    if (!id) { resetScanner(500); return; }
+
+    if (quickMode) {
+      await doAdd({ scryfall_id: id, card_name: nm }, false, currentDeck);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      showNotif({
+        type: currentDeck ? 'success' : 'warn',
+        text: nm,
+        sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
+        engine: 'local',
+      });
+      resetScanner(SCAN_COOLDOWN_MS);
+    } else {
+      // Review — show the sheet instantly from local data, enrich image/price async.
+      setResult({
+        scryfall_id: id, card_name: nm, _engine: 'local',
+        _dist: m.distance, _gap: m.runnerUp - m.distance, _detected: true, _confident: true,
+      });
+      apiFetch('/api/scan/resolve', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scryfall_id: id }),
+      }).then(r => r.json()).then(d => {
+        if (d?.card && mounted.current) setResult(prev => (prev ? { ...prev, ...d.card } : prev));
+      }).catch(() => {});
+    }
+  }, [dbFlat, dbCount, dbIds, dbNames, quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked]);
 
   // Review mode: user confirms the card in the sheet
   const onReviewAdd = useCallback(async () => {
@@ -474,38 +585,89 @@ export default function CameraView({
 
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
-    if (dbFlat == null || scanBlocked.value) return;
-    const { width, height, bytesPerRow, pixelFormat } = frame;
-    let bytes: Uint8Array;
-    try {
-      bytes = new Uint8Array(frame.toArrayBuffer());
-      if (!fpReported.value) { fpReported.value = true; reportFp(true); }
-    } catch {
-      // frame.toArrayBuffer() needs minSdkVersion 26 — report once, then bail.
-      if (!fpReported.value) { fpReported.value = true; reportFp(false); }
-      return;
-    }
-    const hash = dhashFromBytes(bytes, width, height, bytesPerRow, pixelFormat === 'yuv', 16);
-    const m = matchHashWorklet(hash, dbFlat, dbCount, 32, popcountTable);
-    const confident = m.distance <= FP_MAX_DIST && (m.runnerUp - m.distance) >= FP_MIN_GAP && m.index >= 0;
+    if (!LIVE_AUTOSCAN || !dbReady.value || scanBlocked.value) return;
+    frameTick.value += 1;
+    if (frameTick.value % FRAME_THROTTLE !== 0) return;
 
-    // DIAGNOSTIC: report the live best distance/gap ~3×/sec so we can see on
-    // screen how close the matcher is getting on real cards.
-    frameTick.value++;
-    if (frameTick.value % 5 === 0) reportMatch(m.distance, m.runnerUp - m.distance);
-    if (confident && m.index === lastMatchIndex.value) {
-      consecutiveCount.value++;
-      if (consecutiveCount.value >= STABLE_FRAMES_NEEDED) {
-        scanBlocked.value = true;
-        consecutiveCount.value = 0;
-        lastMatchIndex.value = -1;
-        handleLocalMatch(m.index);
+    try {
+      const fw = frame.width, fh = frame.height;
+      let pw: number, ph: number;
+      if (fw >= fh) { pw = PROC_LONG; ph = Math.round((fh * PROC_LONG) / fw); }
+      else { ph = PROC_LONG; pw = Math.round((fw * PROC_LONG) / fh); }
+
+      // Frame → resized BGR buffer → Mat (native, no snapshot).
+      const rgb = resize(frame, { scale: { width: pw, height: ph }, pixelFormat: 'bgr', dataType: 'uint8' });
+      const src = OpenCV.bufferToMat('uint8', ph, pw, 3, rgb);
+      const gray = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
+      OpenCV.invoke('cvtColor', src, gray, ColorConversionCodes.COLOR_BGR2GRAY);
+      const blur = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
+      OpenCV.invoke('GaussianBlur', gray, blur, OpenCV.createObject(ObjectType.Size, 5, 5), 0);
+      const edges = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
+      OpenCV.invoke('Canny', blur, edges, 50, 150);
+      const contours = OpenCV.createObject(ObjectType.MatVector);
+      OpenCV.invoke('findContours', edges, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
+      const cinfo = OpenCV.toJSValue(contours);
+      const n = cinfo.array.length;
+      if (!fpReported.value) { fpReported.value = true; reportFp(true); }
+
+      const minArea = MIN_AREA_FRAC * pw * ph;
+      let best: Pt[] | null = null;
+      let bestArea = 0;
+      for (let i = 0; i < n; i++) {
+        const c = OpenCV.copyObjectFromVector(contours, i);
+        const area = OpenCV.invoke('contourArea', c, false).value;
+        if (area < minArea) continue;
+        const peri = OpenCV.invoke('arcLength', c, true).value;
+        const approx = OpenCV.createObject(ObjectType.PointVector);
+        OpenCV.invoke('approxPolyDP', c, approx, 0.02 * peri, true);
+        const pj = OpenCV.toJSValue(approx);
+        if (pj.array.length !== 4) continue;
+        const ord = orderQuadPortraitW(pj.array as Pt[]);
+        const w = (hypotW(ord[0], ord[1]) + hypotW(ord[3], ord[2])) / 2;
+        const h = (hypotW(ord[0], ord[3]) + hypotW(ord[1], ord[2])) / 2;
+        const ratio = Math.min(w, h) / Math.max(w, h);
+        if (ratio < ASPECT_LO || ratio > ASPECT_HI) continue;
+        if (area > bestArea) { bestArea = area; best = ord; }
       }
-    } else {
-      lastMatchIndex.value = confident ? m.index : -1;
-      consecutiveCount.value = confident ? 1 : 0;
+
+      if (!best) { stableCount.value = 0; OpenCV.clearBuffers(); return; }
+
+      // Require the card to be held roughly still before locking (avoids blur).
+      const cx = (best[0].x + best[1].x + best[2].x + best[3].x) / 4;
+      const cy = (best[0].y + best[1].y + best[2].y + best[3].y) / 4;
+      const moved = Math.abs(cx - lastCx.value) + Math.abs(cy - lastCy.value);
+      lastCx.value = cx; lastCy.value = cy;
+      stableCount.value = moved < pw * 0.05 ? stableCount.value + 1 : 1;
+
+      if (stableCount.value >= STABLE_FRAMES_NEEDED) {
+        const srcPV = OpenCV.createObject(ObjectType.Point2fVector, [
+          OpenCV.createObject(ObjectType.Point2f, best[0].x, best[0].y),
+          OpenCV.createObject(ObjectType.Point2f, best[1].x, best[1].y),
+          OpenCV.createObject(ObjectType.Point2f, best[2].x, best[2].y),
+          OpenCV.createObject(ObjectType.Point2f, best[3].x, best[3].y),
+        ]);
+        const dstPV = OpenCV.createObject(ObjectType.Point2fVector, [
+          OpenCV.createObject(ObjectType.Point2f, 0, 0),
+          OpenCV.createObject(ObjectType.Point2f, WARP_W - 1, 0),
+          OpenCV.createObject(ObjectType.Point2f, WARP_W - 1, WARP_H - 1),
+          OpenCV.createObject(ObjectType.Point2f, 0, WARP_H - 1),
+        ]);
+        const M = OpenCV.invoke('getPerspectiveTransform', srcPV, dstPV, DecompTypes.DECOMP_LU);
+        const warped = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
+        OpenCV.invoke('warpPerspective', gray, warped, M, OpenCV.createObject(ObjectType.Size, WARP_W, WARP_H),
+          InterpolationFlags.INTER_LINEAR, BorderTypes.BORDER_CONSTANT, OpenCV.createObject(ObjectType.Scalar, 0));
+        const out = OpenCV.matToBuffer(warped, 'uint8');
+        scanBlocked.value = true; // lock until the JS handler resolves + cools down
+        stableCount.value = 0;
+        onWarpedCard(out.buffer, out.cols, out.rows);
+      }
+
+      OpenCV.clearBuffers();
+    } catch (e) {
+      if (!fpErrReported.value) { fpErrReported.value = true; onFpError(String(e)); }
+      try { OpenCV.clearBuffers(); } catch (e2) {}
     }
-  }, [dbFlat, dbCount, popcountTable, handleLocalMatch, scanBlocked, consecutiveCount, lastMatchIndex, fpReported, reportFp, frameTick, reportMatch]);
+  }, [dbReady, scanBlocked, frameTick, resize, fpReported, reportFp, fpErrReported, onFpError, onWarpedCard, lastCx, lastCy, stableCount]);
 
   // ── Permission / device guards ─────────────────────────────────────────────
 
@@ -609,9 +771,9 @@ export default function CameraView({
           <Text style={S.vfHint}>
             {loadError ? `⚠️ Load failed: ${loadError}`
               : !dbLoaded ? `⏳ ${loadStage}`
-              : resolving ? '⚡ Matched — saving…'
+              : resolving ? '⚡ Saving…'
               : manualScanning ? '⚡ Reading card…'
-              : '📷 Line up the card, then tap ⚡ Force Scan'}
+              : '📷 Hold a card steady in the box — it scans automatically'}
           </Text>
         </View>
       )}
@@ -620,10 +782,12 @@ export default function CameraView({
       {!result && (
         <View pointerEvents="none" style={S.diag}>
           <Text style={S.diagText}>
-            [{BUILD_TAG}]  DB: {dbLoaded ? `✓ ${dbCount}` : '…'}   ·   Force Scan mode
+            [{BUILD_TAG}]  DB: {dbLoaded ? `✓ ${dbCount}` : '…'}   ·   Auto-scan: {
+              fpStatus === 'active' ? '✓ live' : fpStatus === 'unavailable' ? '✗' : dbLoaded ? '…ready' : '…'
+            }
           </Text>
           <Text style={S.diagHint}>
-            tap Force Scan — result shows the guessed card + dist/gap
+            {liveDist != null ? `last match dist=${liveDist} (lower=better, ≤${AUTO_MAX_DIST} adds)` : 'hold a card steady in the box'}
           </Text>
         </View>
       )}

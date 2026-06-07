@@ -49,7 +49,7 @@ function hypot(ax: number, ay: number, bx: number, by: number): number {
 }
 
 // dHash on a single-channel (grayscale) buffer — same grid math as the DB build.
-function dhashGray(data: Uint8Array, sw: number, sh: number, size = 16): Uint8Array {
+export function dhashGray(data: Uint8Array, sw: number, sh: number, size = 16): Uint8Array {
   const gw = size + 1, gh = size;
   const grid = new Float64Array(gw * gh);
   for (let gy = 0; gy < gh; gy++) {
@@ -224,7 +224,7 @@ export async function matchPhotoOpenCV(base64Jpeg: string): Promise<OpenCVMatch>
   }
 }
 
-function reversed(buf: Uint8Array): Uint8Array {
+export function reversed(buf: Uint8Array): Uint8Array {
   const n = buf.length;
   const out = new Uint8Array(n);
   for (let i = 0; i < n; i++) out[i] = buf[n - 1 - i];
