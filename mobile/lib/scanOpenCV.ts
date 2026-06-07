@@ -160,13 +160,20 @@ export async function matchPhotoOpenCV(base64Jpeg: string): Promise<OpenCVMatch>
 
     if (bestQuad) {
       detected = true;
-      const srcPV = OpenCV.createObject(ObjectType.PointVector);
-      for (const p of bestQuad) OpenCV.addObjectToVector(srcPV, OpenCV.createObject(ObjectType.Point, Math.round(p.x), Math.round(p.y)));
-      const dstPV = OpenCV.createObject(ObjectType.PointVector);
-      OpenCV.addObjectToVector(dstPV, OpenCV.createObject(ObjectType.Point, 0, 0));
-      OpenCV.addObjectToVector(dstPV, OpenCV.createObject(ObjectType.Point, WARP_W - 1, 0));
-      OpenCV.addObjectToVector(dstPV, OpenCV.createObject(ObjectType.Point, WARP_W - 1, WARP_H - 1));
-      OpenCV.addObjectToVector(dstPV, OpenCV.createObject(ObjectType.Point, 0, WARP_H - 1));
+      // getPerspectiveTransform requires Point2f (float) vectors, NOT integer
+      // Point vectors — passing the wrong kind throws "not a Point2fVector".
+      const srcPV = OpenCV.createObject(ObjectType.Point2fVector, [
+        OpenCV.createObject(ObjectType.Point2f, bestQuad[0].x, bestQuad[0].y),
+        OpenCV.createObject(ObjectType.Point2f, bestQuad[1].x, bestQuad[1].y),
+        OpenCV.createObject(ObjectType.Point2f, bestQuad[2].x, bestQuad[2].y),
+        OpenCV.createObject(ObjectType.Point2f, bestQuad[3].x, bestQuad[3].y),
+      ]);
+      const dstPV = OpenCV.createObject(ObjectType.Point2fVector, [
+        OpenCV.createObject(ObjectType.Point2f, 0, 0),
+        OpenCV.createObject(ObjectType.Point2f, WARP_W - 1, 0),
+        OpenCV.createObject(ObjectType.Point2f, WARP_W - 1, WARP_H - 1),
+        OpenCV.createObject(ObjectType.Point2f, 0, WARP_H - 1),
+      ]);
       const M = OpenCV.invoke('getPerspectiveTransform', srcPV, dstPV, DecompTypes.DECOMP_LU);
       const warped = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
       OpenCV.invoke('warpPerspective', gray, warped, M, OpenCV.createObject(ObjectType.Size, WARP_W, WARP_H),

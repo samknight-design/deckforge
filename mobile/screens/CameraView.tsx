@@ -44,7 +44,7 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'opencv-v3';
+const BUILD_TAG = 'opencv-v4';
 
 // Continuous on-camera auto-scan is OFF for now: the old per-frame matcher runs
 // the full 114k comparison on EVERY frame and freezes the phone. The accurate
