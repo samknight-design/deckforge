@@ -59,7 +59,7 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'opencv-v5';
+const BUILD_TAG = 'opencv-v6';
 
 // Continuous auto-scan: native OpenCV detects + flattens the card every (throttled)
 // frame on the camera thread; the heavy 114k match runs once on the JS thread only
@@ -430,12 +430,13 @@ export default function CameraView({
   // Called from the worklet when a steady card has been detected + flattened.
   // Runs the 114k match on the JS thread (fast, off the camera thread), then
   // auto-adds (quick) or opens the review sheet — using LOCAL names, NO network.
-  const onWarpedCard = useRunOnJS(async (buf: Uint8Array, w: number, h: number) => {
+  const onWarpedCard = useRunOnJS(async (buf: number[], w: number, h: number) => {
     if (!dbFlat || !dbIds || !mounted.current) { scanBlocked.value = false; return; }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    const u8 = Uint8Array.from(buf);
     const db = { count: dbCount, bytesPerHash: 32, flat: dbFlat };
-    const m0 = matchHash(dhashGray(buf, w, h), db);
-    const m180 = matchHash(dhashGray(reversed(buf), w, h), db);
+    const m0 = matchHash(dhashGray(u8, w, h), db);
+    const m180 = matchHash(dhashGray(reversed(u8), w, h), db);
     const m = m180.distance < m0.distance ? m180 : m0;
     setLiveDist(m.distance); setLiveGap(m.runnerUp - m.distance);
 
@@ -657,9 +658,18 @@ export default function CameraView({
         OpenCV.invoke('warpPerspective', gray, warped, M, OpenCV.createObject(ObjectType.Size, WARP_W, WARP_H),
           InterpolationFlags.INTER_LINEAR, BorderTypes.BORDER_CONSTANT, OpenCV.createObject(ObjectType.Scalar, 0));
         const out = OpenCV.matToBuffer(warped, 'uint8');
+        const src = out.buffer;
+        const len = src.length;
+        // Copy into a plain number[] BEFORE clearBuffers frees native memory, and
+        // pass an array (reliably marshalled worklet→JS). Native views / typed
+        // arrays came across as zeros → every scan matched the same card.
+        const arr: number[] = [];
+        for (let i = 0; i < len; i++) arr.push(src[i]);
         scanBlocked.value = true; // lock until the JS handler resolves + cools down
         stableCount.value = 0;
-        onWarpedCard(out.buffer, out.cols, out.rows);
+        OpenCV.clearBuffers();
+        onWarpedCard(arr, out.cols, out.rows);
+        return;
       }
 
       OpenCV.clearBuffers();
