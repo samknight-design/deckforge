@@ -41,6 +41,7 @@ export type OpenCVMatch = {
   index: number;
   distance: number;
   gap: number;
+  error?: string;        // set if the native pipeline threw — surfaced on screen
 };
 
 function hypot(ax: number, ay: number, bx: number, by: number): number {
@@ -95,7 +96,11 @@ function orderQuadPortrait(pts: Array<{ x: number; y: number }>): Array<{ x: num
   return ord;
 }
 
-export async function matchPhotoOpenCV(base64Jpeg: string): Promise<OpenCVMatch | null> {
+function errResult(msg: string): OpenCVMatch {
+  return { detected: false, contourCount: 0, quadCount: 0, scryfallId: null, index: -1, distance: -1, gap: -1, error: msg };
+}
+
+export async function matchPhotoOpenCV(base64Jpeg: string): Promise<OpenCVMatch> {
   const { db, ids } = await prepareScanDb();
   const t0 = Date.now();
 
@@ -103,7 +108,7 @@ export async function matchPhotoOpenCV(base64Jpeg: string): Promise<OpenCVMatch 
     const srcColor = OpenCV.base64ToMat(base64Jpeg);
     const dims = OpenCV.matToBuffer(srcColor, 'uint8'); // also gives us cols/rows
     const srcW = dims.cols, srcH = dims.rows;
-    if (!srcW || !srcH) return null;
+    if (!srcW || !srcH) return errResult('decode failed (0x0 image)');
 
     // Downscale for fast, stable edge detection (preserve aspect).
     const scale = PROC_LONG / Math.max(srcW, srcH);
@@ -120,15 +125,9 @@ export async function matchPhotoOpenCV(base64Jpeg: string): Promise<OpenCVMatch 
 
     const edges = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
     OpenCV.invoke('Canny', blur, edges, 50, 150);
-    // Dilate to close small gaps in the card border so the contour is whole.
-    const dil = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
-    const kernel = OpenCV.createObject(ObjectType.Mat, 3, 3, DataTypes.CV_8U, new Array(9).fill(255));
-    OpenCV.invoke('dilate', edges, dil,
-      kernel, OpenCV.createObject(ObjectType.Point, -1, -1), 1,
-      BorderTypes.BORDER_CONSTANT, OpenCV.createObject(ObjectType.Scalar, 0));
 
     const contours = OpenCV.createObject(ObjectType.MatVector);
-    OpenCV.invoke('findContours', dil, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
+    OpenCV.invoke('findContours', edges, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
     const cinfo = OpenCV.toJSValue(contours);
     const contourCount = cinfo.array.length;
 
@@ -210,10 +209,11 @@ export async function matchPhotoOpenCV(base64Jpeg: string): Promise<OpenCVMatch 
     const best = m180.distance < m0.distance ? m180 : m0;
     return finalize(detected, contourCount, quadCount, best, ids, t0);
   } catch (e) {
-    console.warn('[opencv] pipeline error:', e);
-    return null;
+    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    console.warn('[opencv] pipeline error:', msg);
+    return errResult(msg);
   } finally {
-    OpenCV.clearBuffers();
+    try { OpenCV.clearBuffers(); } catch {}
   }
 }
 

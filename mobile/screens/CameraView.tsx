@@ -44,7 +44,7 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'opencv-v2';
+const BUILD_TAG = 'opencv-v3';
 
 // Continuous on-camera auto-scan is OFF for now: the old per-frame matcher runs
 // the full 114k comparison on EVERY frame and freezes the phone. The accurate
@@ -396,6 +396,13 @@ export default function CameraView({
       });
 
       const match = await matchPhotoOpenCV(base64);
+      if (match?.error) {
+        // Surface the real OpenCV error so we can diagnose it (instead of
+        // silently falling back to AI every time).
+        Alert.alert('On-device scan error', match.error.slice(0, 400));
+        resetScanner();
+        return;
+      }
       if (match?.scryfallId) {
         // DIAGNOSTIC: always show the OpenCV best guess + numbers (confident or
         // not) so we can read on screen whether the matcher got the right card.
