@@ -44,7 +44,13 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'opencv-v1';
+const BUILD_TAG = 'opencv-v2';
+
+// Continuous on-camera auto-scan is OFF for now: the old per-frame matcher runs
+// the full 114k comparison on EVERY frame and freezes the phone. The accurate
+// OpenCV pipeline runs on the Force Scan button instead. Step 2 will build a
+// performant continuous version and flip this back on.
+const LIVE_AUTOSCAN = false;
 
 const FP_MAX_DIST          = 75;
 const FP_MIN_GAP           = 7;
@@ -544,7 +550,7 @@ export default function CameraView({
         pixelFormat="yuv"
         isActive={!result}
         photo
-        frameProcessor={dbLoaded && !result ? frameProcessor : undefined}
+        frameProcessor={LIVE_AUTOSCAN && dbLoaded && !result ? frameProcessor : undefined}
       />
 
       {/* ── Top bar ─────────────────────────────────────────────────────── */}
@@ -597,9 +603,8 @@ export default function CameraView({
             {loadError ? `⚠️ Load failed: ${loadError}`
               : !dbLoaded ? `⏳ ${loadStage}`
               : resolving ? '⚡ Matched — saving…'
-              : manualScanning ? '⚡ Scanning…'
-              : quickMode ? '📷 Point at a card — auto-scans'
-              : '📷 Point at a card — will pause for review'}
+              : manualScanning ? '⚡ Reading card…'
+              : '📷 Line up the card, then tap ⚡ Force Scan'}
           </Text>
         </View>
       )}
@@ -608,17 +613,10 @@ export default function CameraView({
       {!result && (
         <View pointerEvents="none" style={S.diag}>
           <Text style={S.diagText}>
-            [{BUILD_TAG}]  DB: {dbLoaded ? `✓ ${dbCount}` : '…'}  ·  Auto-scan: {
-              fpStatus === 'active' ? '✓'
-              : fpStatus === 'unavailable' ? '✗ needs build'
-              : dbLoaded ? '…frames' : '…'
-            }
-          </Text>
-          <Text style={S.diagBig}>
-            {liveDist != null ? `closest: dist=${liveDist}  gap=${liveGap}` : 'point at a card…'}
+            [{BUILD_TAG}]  DB: {dbLoaded ? `✓ ${dbCount}` : '…'}   ·   Force Scan mode
           </Text>
           <Text style={S.diagHint}>
-            lower dist = better · need dist≤{FP_MAX_DIST} & gap≥{FP_MIN_GAP} to lock
+            tap Force Scan — result shows the guessed card + dist/gap
           </Text>
         </View>
       )}
