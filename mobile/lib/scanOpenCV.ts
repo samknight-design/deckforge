@@ -29,7 +29,7 @@ import { prepareScanDb, idAt } from './scanLocal';
 const PROC_LONG = 600;   // process at this long-side resolution (speed vs detail)
 const WARP_W = 146;      // warp output size — mirrors Scryfall 'small' source
 const WARP_H = 204;
-const MIN_AREA_FRAC = 0.12; // card quad must cover ≥12% of the frame
+const MIN_AREA_FRAC = 0.08; // card quad must cover ≥8% of the frame
 const ASPECT_LO = 0.55;     // card ratio is 63/88 ≈ 0.716; accept a band around it
 const ASPECT_HI = 0.92;
 
@@ -46,6 +46,17 @@ export type OpenCVMatch = {
 
 function hypot(ax: number, ay: number, bx: number, by: number): number {
   return Math.hypot(ax - bx, ay - by);
+}
+
+// 4 corners of a (possibly rotated) rectangle from minAreaRect's center/size/angle.
+function rectCorners(r: { centerX: number; centerY: number; width: number; height: number; angle: number }): Array<{ x: number; y: number }> {
+  const rad = (r.angle * Math.PI) / 180;
+  const c = Math.cos(rad), s = Math.sin(rad);
+  const hw = r.width / 2, hh = r.height / 2;
+  return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([dx, dy]) => ({
+    x: r.centerX + dx * c - dy * s,
+    y: r.centerY + dx * s + dy * c,
+  }));
 }
 
 // dHash on a single-channel (grayscale) buffer — same grid math as the DB build.
@@ -124,10 +135,15 @@ export async function matchPhotoOpenCV(base64Jpeg: string): Promise<OpenCVMatch>
     OpenCV.invoke('GaussianBlur', gray, blur, OpenCV.createObject(ObjectType.Size, 5, 5), 0);
 
     const edges = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
-    OpenCV.invoke('Canny', blur, edges, 50, 150);
+    OpenCV.invoke('Canny', blur, edges, 30, 90);
+    // Thicken edges so a card's broken border closes into ONE solid contour.
+    const dil = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
+    const kernel = OpenCV.createObject(ObjectType.Mat, 5, 5, DataTypes.CV_8U, new Array(25).fill(1));
+    OpenCV.invoke('dilate', edges, dil, kernel, OpenCV.createObject(ObjectType.Point, -1, -1), 2,
+      BorderTypes.BORDER_CONSTANT, OpenCV.createObject(ObjectType.Scalar, 0));
 
     const contours = OpenCV.createObject(ObjectType.MatVector);
-    OpenCV.invoke('findContours', edges, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
+    OpenCV.invoke('findContours', dil, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
     const cinfo = OpenCV.toJSValue(contours);
     const contourCount = cinfo.array.length;
 
@@ -140,19 +156,17 @@ export async function matchPhotoOpenCV(base64Jpeg: string): Promise<OpenCVMatch>
       const c = OpenCV.copyObjectFromVector(contours, i);
       const area = OpenCV.invoke('contourArea', c, false).value;
       if (area < minArea) continue;
-      const peri = OpenCV.invoke('arcLength', c, true).value;
-      const approx = OpenCV.createObject(ObjectType.PointVector);
-      OpenCV.invoke('approxPolyDP', c, approx, 0.02 * peri, true);
-      const pj = OpenCV.toJSValue(approx);
-      if (pj.array.length !== 4) continue;
-
-      const ord = orderQuadPortrait(pj.array);
-      const w = (hypot(ord[0].x, ord[0].y, ord[1].x, ord[1].y) + hypot(ord[3].x, ord[3].y, ord[2].x, ord[2].y)) / 2;
-      const h = (hypot(ord[0].x, ord[0].y, ord[3].x, ord[3].y) + hypot(ord[1].x, ord[1].y, ord[2].x, ord[2].y)) / 2;
-      const ratio = Math.min(w, h) / Math.max(w, h);
+      // Smallest enclosing (possibly rotated) rectangle — robust to imperfect contours.
+      const rr = OpenCV.invoke('minAreaRect', c);
+      const r = OpenCV.toJSValue(rr) as { centerX: number; centerY: number; width: number; height: number; angle: number };
+      const rw = r.width, rh = r.height;
+      if (rw <= 1 || rh <= 1) continue;
+      const ratio = Math.min(rw, rh) / Math.max(rw, rh);
       if (ratio < ASPECT_LO || ratio > ASPECT_HI) continue;
+      const rectArea = rw * rh;
+      if (area < 0.6 * rectArea) continue; // contour must mostly fill its box (a card does)
       quadCount++;
-      if (area > bestArea) { bestArea = area; bestQuad = ord; }
+      if (rectArea > bestArea) { bestArea = rectArea; bestQuad = orderQuadPortrait(rectCorners(r)); }
     }
 
     let warpedBuf: Uint8Array;

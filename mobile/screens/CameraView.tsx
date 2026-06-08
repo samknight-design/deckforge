@@ -78,7 +78,7 @@ const MAX_FREE_AI_SCANS    = 10;
 const PROC_LONG     = 480;          // detection resolution (long side)
 const WARP_W        = 146;          // warped card size fed to the matcher
 const WARP_H        = 204;
-const MIN_AREA_FRAC = 0.12;         // card quad must cover ≥12% of the frame
+const MIN_AREA_FRAC = 0.08;         // card quad must cover ≥8% of the frame
 const ASPECT_LO     = 0.55;         // card ratio 63/88 ≈ 0.716
 const ASPECT_HI     = 0.92;
 
@@ -179,6 +179,18 @@ function orderQuadPortraitW(pts: Pt[]): Pt[] {
   const h = (hypotW(ord[0], ord[3]) + hypotW(ord[1], ord[2])) / 2;
   if (w > h) ord = [ord[1], ord[2], ord[3], ord[0]];
   return ord;
+}
+
+// 4 corners of minAreaRect's center/size/angle (worklet).
+function rectCornersW(r: { centerX: number; centerY: number; width: number; height: number; angle: number }): Pt[] {
+  'worklet';
+  const rad = (r.angle * Math.PI) / 180;
+  const c = Math.cos(rad), s = Math.sin(rad);
+  const hw = r.width / 2, hh = r.height / 2;
+  const d = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]];
+  const out: Pt[] = [];
+  for (let i = 0; i < 4; i++) out.push({ x: r.centerX + d[i][0] * c - d[i][1] * s, y: r.centerY + d[i][0] * s + d[i][1] * c });
+  return out;
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -439,6 +451,8 @@ export default function CameraView({
     const m180 = matchHash(dhashGray(reversed(u8), w, h), db);
     const m = m180.distance < m0.distance ? m180 : m0;
     setLiveDist(m.distance); setLiveGap(m.runnerUp - m.distance);
+    const nmDbg = (dbNames && nameAt(dbNames, m.index)) || '?';
+    console.log(`[live] best=${nmDbg} dist=${m.distance} → ${m.distance <= AUTO_MAX_DIST ? 'ADD' : 'skip'}`);
 
     if (m.distance > AUTO_MAX_DIST) { resetScanner(500); return; } // unsure → keep scanning
 
@@ -604,9 +618,14 @@ export default function CameraView({
       const blur = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
       OpenCV.invoke('GaussianBlur', gray, blur, OpenCV.createObject(ObjectType.Size, 5, 5), 0);
       const edges = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
-      OpenCV.invoke('Canny', blur, edges, 50, 150);
+      OpenCV.invoke('Canny', blur, edges, 30, 90);
+      // Thicken edges so faint/low-contrast card borders close into one contour.
+      const dil = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
+      const kernel = OpenCV.createObject(ObjectType.Mat, 5, 5, DataTypes.CV_8U, new Array(25).fill(1));
+      OpenCV.invoke('dilate', edges, dil, kernel, OpenCV.createObject(ObjectType.Point, -1, -1), 2,
+        BorderTypes.BORDER_CONSTANT, OpenCV.createObject(ObjectType.Scalar, 0));
       const contours = OpenCV.createObject(ObjectType.MatVector);
-      OpenCV.invoke('findContours', edges, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
+      OpenCV.invoke('findContours', dil, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
       const cinfo = OpenCV.toJSValue(contours);
       const n = cinfo.array.length;
       if (!fpReported.value) { fpReported.value = true; reportFp(true); }
@@ -618,17 +637,15 @@ export default function CameraView({
         const c = OpenCV.copyObjectFromVector(contours, i);
         const area = OpenCV.invoke('contourArea', c, false).value;
         if (area < minArea) continue;
-        const peri = OpenCV.invoke('arcLength', c, true).value;
-        const approx = OpenCV.createObject(ObjectType.PointVector);
-        OpenCV.invoke('approxPolyDP', c, approx, 0.02 * peri, true);
-        const pj = OpenCV.toJSValue(approx);
-        if (pj.array.length !== 4) continue;
-        const ord = orderQuadPortraitW(pj.array as Pt[]);
-        const w = (hypotW(ord[0], ord[1]) + hypotW(ord[3], ord[2])) / 2;
-        const h = (hypotW(ord[0], ord[3]) + hypotW(ord[1], ord[2])) / 2;
-        const ratio = Math.min(w, h) / Math.max(w, h);
+        const rr = OpenCV.invoke('minAreaRect', c);
+        const r = OpenCV.toJSValue(rr) as { centerX: number; centerY: number; width: number; height: number; angle: number };
+        const rw = r.width, rh = r.height;
+        if (rw <= 1 || rh <= 1) continue;
+        const ratio = Math.min(rw, rh) / Math.max(rw, rh);
         if (ratio < ASPECT_LO || ratio > ASPECT_HI) continue;
-        if (area > bestArea) { bestArea = area; best = ord; }
+        const rectArea = rw * rh;
+        if (area < 0.6 * rectArea) continue; // contour must mostly fill its box (a card does)
+        if (rectArea > bestArea) { bestArea = rectArea; best = orderQuadPortraitW(rectCornersW(r)); }
       }
 
       if (!best) { stableCount.value = 0; OpenCV.clearBuffers(); return; }
@@ -728,7 +745,6 @@ export default function CameraView({
         format={format}
         pixelFormat="yuv"
         isActive={!result}
-        photo
         frameProcessor={LIVE_AUTOSCAN && dbLoaded && !result ? frameProcessor : undefined}
       />
 
