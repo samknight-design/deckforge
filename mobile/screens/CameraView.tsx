@@ -69,6 +69,7 @@ const LIVE_AUTOSCAN = true;
 // dist ≤ this counts as a confident match. gap is NOT used — reprints share
 // artwork, so the runner-up is often another printing of the SAME card (gap≈0).
 const AUTO_MAX_DIST        = 72;
+const AI_ESCALATE_MS       = 2500;  // card steady-but-unmatched this long → auto AI scan
 const STABLE_FRAMES_NEEDED = 3;     // card centroid steady this many detections → lock
 const FRAME_THROTTLE       = 3;     // run the detector every Nth frame
 const SCAN_COOLDOWN_MS     = 1500;  // pause after a hit before re-arming
@@ -235,6 +236,7 @@ export default function CameraView({
   const mounted = useRef(true);
   const cameraRef = useRef<Camera>(null);
   const notifTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rejectSince = useRef(0); // when a steady card first failed to match (for AI escalation)
 
   // Crisp preview (720p). The dhash worklet samples with a stride, so its cost
   // stays bounded regardless of frame resolution — no need to cripple the preview.
@@ -255,6 +257,9 @@ export default function CameraView({
   // deck picker can be opened from top bar (quick) or result sheet (review)
   const [deckPickerVisible, setDeckPickerVisible] = useState(false);
   const [aiScansUsed, setAiScansUsed]       = useState(0);
+  const [aiThinking, setAiThinking]         = useState(false); // "✨ Asking AI…" indicator
+  const [reading, setReading]               = useState(false); // "🔍 Reading card…" (card detected, working)
+  const readingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // quick mode: flash notification
   const [scanNotif, setScanNotif]           = useState<ScanNotif | null>(null);
   // review mode: result sheet
@@ -393,6 +398,48 @@ export default function CameraView({
     });
   }, [userId, showXp]);
 
+  // Snapshot → AI Smart Scan. Used as the automatic escalation when on-device
+  // can't read a card, and by the manual Force Scan. Returns true if identified.
+  const runAiScan = useCallback(async (): Promise<boolean> => {
+    if (!cameraRef.current) return false;
+    if (aiScansUsed >= MAX_FREE_AI_SCANS) {
+      showNotif({ type: 'warn', text: 'AI assists used up today', sub: 'Upgrade to Pro for unlimited' });
+      return false;
+    }
+    if (mounted.current) setAiThinking(true);
+    try {
+      const photo = await cameraRef.current.takeSnapshot({ quality: 60 });
+      const fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
+      setAiScansUsed(n => n + 1);
+      const formData = new FormData();
+      (formData as any).append('image', { uri: fileUri, type: 'image/jpeg', name: 'scan.jpg' });
+      const res = await apiFetch('/api/scan', { method: 'POST', body: formData });
+      const data = await res.json().catch(() => ({}));
+      console.log(`[ai] escalated → ${res.ok && data?.card ? data.card.card_name : 'no match'}`);
+      if (res.ok && data?.card) {
+        const card = data.card;
+        if (quickMode) {
+          await doAdd({ scryfall_id: card.scryfall_id, card_name: card.card_name }, false, currentDeck);
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+          showNotif({
+            type: currentDeck ? 'success' : 'warn',
+            text: card.card_name,
+            sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
+            engine: 'smart',
+          });
+        } else {
+          setResult({ ...card, _engine: 'smart' });
+        }
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      if (mounted.current) setAiThinking(false);
+    }
+  }, [aiScansUsed, quickMode, currentDeck, doAdd, showNotif]);
+
   // ── Core: resolve a match index to a full card, then act on mode ───────────
 
   const handleLocalMatch = useRunOnJS(async (matchIndex: number) => {
@@ -442,9 +489,13 @@ export default function CameraView({
   // Called from the worklet when a steady card has been detected + flattened.
   // Runs the 114k match on the JS thread (fast, off the camera thread), then
   // auto-adds (quick) or opens the review sheet — using LOCAL names, NO network.
-  const onWarpedCard = useRunOnJS(async (buf: number[], w: number, h: number) => {
+  const onWarpedCard = useRunOnJS(async (buf: number[], w: number, h: number, tier: number) => {
     if (!dbFlat || !dbIds || !mounted.current) { scanBlocked.value = false; return; }
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    // A card was detected & flattened → show active "Reading…" feedback so the
+    // pre-AI wait doesn't look idle. Clears shortly after detections stop.
+    setReading(true);
+    if (readingTimer.current) clearTimeout(readingTimer.current);
+    readingTimer.current = setTimeout(() => { if (mounted.current) setReading(false); }, 900);
     const u8 = Uint8Array.from(buf);
     const db = { count: dbCount, bytesPerHash: 32, flat: dbFlat };
     const m0 = matchHash(dhashGray(u8, w, h), db);
@@ -452,17 +503,31 @@ export default function CameraView({
     const m = m180.distance < m0.distance ? m180 : m0;
     setLiveDist(m.distance); setLiveGap(m.runnerUp - m.distance);
     const nmDbg = (dbNames && nameAt(dbNames, m.index)) || '?';
-    console.log(`[live] best=${nmDbg} dist=${m.distance} → ${m.distance <= AUTO_MAX_DIST ? 'ADD' : 'skip'}`);
+    console.log(`[live] best=${nmDbg} dist=${m.distance} tier=${tier} → ${m.distance <= AUTO_MAX_DIST ? 'ADD' : 'skip'}`);
 
-    if (m.distance > AUTO_MAX_DIST) { resetScanner(500); return; } // unsure → keep scanning
+    if (m.distance > AUTO_MAX_DIST) {
+      // A steady card that won't match locally → after a few seconds, hand to AI.
+      const now = Date.now();
+      if (rejectSince.current === 0) rejectSince.current = now;
+      if (now - rejectSince.current >= AI_ESCALATE_MS) {
+        rejectSince.current = 0;
+        const ok = await runAiScan();
+        resetScanner(ok ? SCAN_COOLDOWN_MS : 1200);
+        return;
+      }
+      resetScanner(400);
+      return;
+    }
+    rejectSince.current = 0; // confident — clear the escalation timer
 
     const id = idAt(dbIds, m.index);
     const nm = (dbNames && nameAt(dbNames, m.index)) || 'Card';
     if (!id) { resetScanner(500); return; }
 
+    // Confident match → ONE success buzz (the only buzz; silence = still trying).
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     if (quickMode) {
       await doAdd({ scryfall_id: id, card_name: nm }, false, currentDeck);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       showNotif({
         type: currentDeck ? 'success' : 'warn',
         text: nm,
@@ -483,7 +548,7 @@ export default function CameraView({
         if (d?.card && mounted.current) setResult(prev => (prev ? { ...prev, ...d.card } : prev));
       }).catch(() => {});
     }
-  }, [dbFlat, dbCount, dbIds, dbNames, quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked]);
+  }, [dbFlat, dbCount, dbIds, dbNames, quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked, runAiScan]);
 
   // Review mode: user confirms the card in the sheet
   const onReviewAdd = useCallback(async () => {
@@ -529,10 +594,9 @@ export default function CameraView({
         resetScanner();
         return;
       }
-      if (match?.scryfallId) {
-        // DIAGNOSTIC: always show the OpenCV best guess + numbers (confident or
-        // not) so we can read on screen whether the matcher got the right card.
-        const confident = match.detected && match.distance <= 70 && match.gap >= 5;
+      // Confident local match → show/add it. Otherwise fall through to AI Smart
+      // Scan (reliable) instead of surfacing a wrong low-confidence guess.
+      if (match?.scryfallId && match.detected && match.distance <= AUTO_MAX_DIST) {
         try {
           const res = await apiFetch('/api/scan/resolve', {
             method: 'POST',
@@ -547,7 +611,7 @@ export default function CameraView({
               _dist: match.distance,
               _gap: match.gap,
               _detected: match.detected,
-              _confident: confident,
+              _confident: true,
               _contours: match.contourCount,
               _quads: match.quadCount,
             });
@@ -619,33 +683,59 @@ export default function CameraView({
       OpenCV.invoke('GaussianBlur', gray, blur, OpenCV.createObject(ObjectType.Size, 5, 5), 0);
       const edges = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
       OpenCV.invoke('Canny', blur, edges, 30, 90);
-      // Thicken edges so faint/low-contrast card borders close into one contour.
-      const dil = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
-      const kernel = OpenCV.createObject(ObjectType.Mat, 5, 5, DataTypes.CV_8U, new Array(25).fill(1));
-      OpenCV.invoke('dilate', edges, dil, kernel, OpenCV.createObject(ObjectType.Point, -1, -1), 2,
-        BorderTypes.BORDER_CONSTANT, OpenCV.createObject(ObjectType.Scalar, 0));
-      const contours = OpenCV.createObject(ObjectType.MatVector);
-      OpenCV.invoke('findContours', dil, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
-      const cinfo = OpenCV.toJSValue(contours);
-      const n = cinfo.array.length;
       if (!fpReported.value) { fpReported.value = true; reportFp(true); }
 
       const minArea = MIN_AREA_FRAC * pw * ph;
       let best: Pt[] | null = null;
       let bestArea = 0;
-      for (let i = 0; i < n; i++) {
+      let usedTier = 0;
+
+      // TIER 1 — precise: exact 4-corner trace on raw edges (tight crop, clean cards).
+      const contours = OpenCV.createObject(ObjectType.MatVector);
+      OpenCV.invoke('findContours', edges, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
+      const ci = OpenCV.toJSValue(contours);
+      for (let i = 0; i < ci.array.length; i++) {
         const c = OpenCV.copyObjectFromVector(contours, i);
         const area = OpenCV.invoke('contourArea', c, false).value;
         if (area < minArea) continue;
-        const rr = OpenCV.invoke('minAreaRect', c);
-        const r = OpenCV.toJSValue(rr) as { centerX: number; centerY: number; width: number; height: number; angle: number };
-        const rw = r.width, rh = r.height;
-        if (rw <= 1 || rh <= 1) continue;
-        const ratio = Math.min(rw, rh) / Math.max(rw, rh);
+        const peri = OpenCV.invoke('arcLength', c, true).value;
+        const approx = OpenCV.createObject(ObjectType.PointVector);
+        OpenCV.invoke('approxPolyDP', c, approx, 0.02 * peri, true);
+        const pj = OpenCV.toJSValue(approx);
+        if (pj.array.length !== 4) continue;
+        const ord = orderQuadPortraitW(pj.array as Pt[]);
+        const w = (hypotW(ord[0], ord[1]) + hypotW(ord[3], ord[2])) / 2;
+        const h = (hypotW(ord[0], ord[3]) + hypotW(ord[1], ord[2])) / 2;
+        const ratio = Math.min(w, h) / Math.max(w, h);
         if (ratio < ASPECT_LO || ratio > ASPECT_HI) continue;
-        const rectArea = rw * rh;
-        if (area < 0.6 * rectArea) continue; // contour must mostly fill its box (a card does)
-        if (rectArea > bestArea) { bestArea = rectArea; best = orderQuadPortraitW(rectCornersW(r)); }
+        if (area > bestArea) { bestArea = area; best = ord; usedTier = 1; }
+      }
+
+      // TIER 2 — robust: only if precise found nothing. Thicken faint borders, take
+      // the largest card-aspect enclosing rectangle (catches Mystical Archive etc.).
+      if (!best) {
+        const dil = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
+        const kernel = OpenCV.createObject(ObjectType.Mat, 5, 5, DataTypes.CV_8U, new Array(25).fill(1));
+        OpenCV.invoke('dilate', edges, dil, kernel, OpenCV.createObject(ObjectType.Point, -1, -1), 2,
+          BorderTypes.BORDER_CONSTANT, OpenCV.createObject(ObjectType.Scalar, 0));
+        const c2 = OpenCV.createObject(ObjectType.MatVector);
+        OpenCV.invoke('findContours', dil, c2, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
+        const ci2 = OpenCV.toJSValue(c2);
+        let bestRectArea = 0;
+        for (let i = 0; i < ci2.array.length; i++) {
+          const c = OpenCV.copyObjectFromVector(c2, i);
+          const area = OpenCV.invoke('contourArea', c, false).value;
+          if (area < minArea) continue;
+          const rr = OpenCV.invoke('minAreaRect', c);
+          const r = OpenCV.toJSValue(rr) as { centerX: number; centerY: number; width: number; height: number; angle: number };
+          const rw = r.width, rh = r.height;
+          if (rw <= 1 || rh <= 1) continue;
+          const ratio = Math.min(rw, rh) / Math.max(rw, rh);
+          if (ratio < ASPECT_LO || ratio > ASPECT_HI) continue;
+          const rectArea = rw * rh;
+          if (area < 0.6 * rectArea) continue;
+          if (rectArea > bestRectArea) { bestRectArea = rectArea; best = orderQuadPortraitW(rectCornersW(r)); usedTier = 2; }
+        }
       }
 
       if (!best) { stableCount.value = 0; OpenCV.clearBuffers(); return; }
@@ -685,7 +775,7 @@ export default function CameraView({
         scanBlocked.value = true; // lock until the JS handler resolves + cools down
         stableCount.value = 0;
         OpenCV.clearBuffers();
-        onWarpedCard(arr, out.cols, out.rows);
+        onWarpedCard(arr, out.cols, out.rows, usedTier);
         return;
       }
 
@@ -728,6 +818,7 @@ export default function CameraView({
 
   const dbLoaded = dbFlat != null;
   const busy = resolving || manualScanning;
+  const working = busy || reading || aiThinking; // any active scan state → highlight viewfinder
 
   const NOTIF_C = {
     success: { bg: 'rgba(16,185,129,0.96)',  fg: '#fff' },
@@ -790,15 +881,17 @@ export default function CameraView({
         <View pointerEvents="none" style={S.vfWrap}>
           <View style={[
             S.vfRect,
-            { borderColor: loadError ? '#ef4444' : busy ? '#f59e0b' : dbLoaded ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)' },
+            { borderColor: loadError ? '#ef4444' : working ? '#f59e0b' : dbLoaded ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)' },
           ]}>
-            {busy && <View style={S.scanLine} />}
+            {working && <View style={S.scanLine} />}
           </View>
           <Text style={S.vfHint}>
             {loadError ? `⚠️ Load failed: ${loadError}`
               : !dbLoaded ? `⏳ ${loadStage}`
+              : aiThinking ? '✨ Asking AI…'
               : resolving ? '⚡ Saving…'
               : manualScanning ? '⚡ Reading card…'
+              : reading ? '🔍 Reading card… hold steady'
               : '📷 Hold a card steady in the box — it scans automatically'}
           </Text>
         </View>
