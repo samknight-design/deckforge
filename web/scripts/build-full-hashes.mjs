@@ -35,16 +35,24 @@ const RETRY = 3;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// dHash — MUST stay byte-identical to lib/cardMatch.js.
+// Art-region crop (proportions of the full card). Fingerprint ONLY the artwork —
+// the unique part — not the generic frame/title/text. MUST stay byte-identical to
+// dhashGray() in mobile/lib/scanOpenCV.ts (same constants + same cell math).
+const ART_X0 = 0.07, ART_X1 = 0.93, ART_Y0 = 0.11, ART_Y1 = 0.58;
+
+// dHash over the art region — byte-identical math to mobile dhashGray().
 function dhashFromImageData(data, sw, sh, size = HASH_SIZE) {
+  const ax0 = Math.round(ART_X0 * sw), ax1 = Math.round(ART_X1 * sw);
+  const ay0 = Math.round(ART_Y0 * sh), ay1 = Math.round(ART_Y1 * sh);
+  const rw = ax1 - ax0, rh = ay1 - ay0;
   const gw = size + 1, gh = size;
   const grid = new Float64Array(gw * gh);
   for (let gy = 0; gy < gh; gy++) {
-    const y0 = Math.floor((gy * sh) / gh);
-    const y1 = Math.max(y0 + 1, Math.floor(((gy + 1) * sh) / gh));
+    const y0 = ay0 + Math.floor((gy * rh) / gh);
+    const y1 = ay0 + Math.max(Math.floor((gy * rh) / gh) + 1, Math.floor(((gy + 1) * rh) / gh));
     for (let gx = 0; gx < gw; gx++) {
-      const x0 = Math.floor((gx * sw) / gw);
-      const x1 = Math.max(x0 + 1, Math.floor(((gx + 1) * sw) / gw));
+      const x0 = ax0 + Math.floor((gx * rw) / gw);
+      const x1 = ax0 + Math.max(Math.floor((gx * rw) / gw) + 1, Math.floor(((gx + 1) * rw) / gw));
       let sum = 0, cnt = 0;
       for (let y = y0; y < y1; y++) {
         for (let x = x0; x < x1; x++) {
@@ -96,25 +104,22 @@ async function* streamBulkCards() {
   const entry = manifest.data.find((e) => e.type === 'default_cards');
   if (!entry) throw new Error('no default_cards in bulk-data');
 
-  const tmpFile = path.join(os.tmpdir(), `deckforge-bulk-${Date.now()}.json`);
-  console.log(`Downloading default_cards (${(entry.size / 1e6).toFixed(0)} MB) → ${tmpFile}`);
-  const cardsRes = await fetch(entry.download_uri, { headers: { 'User-Agent': USER_AGENT } });
-  if (!cardsRes.ok) throw new Error(`default_cards ${cardsRes.status}`);
-  if (!cardsRes.body) throw new Error('default_cards response has no body');
-  // Pipe HTTP body → disk
-  await pipeline(Readable.fromWeb(cardsRes.body), createWriteStream(tmpFile));
-  console.log('Download complete. Streaming parse…');
-
-  try {
-    // Stream-parse the top-level JSON array: each yielded value is a card object.
-    // withParserAsStream() returns a Node stream in object mode that emits
-    // { key, value } per array element.
-    const stream = createReadStream(tmpFile).pipe(streamArray.withParserAsStream());
-    for await (const { value } of stream) {
-      yield value;
-    }
-  } finally {
-    try { await unlink(tmpFile); } catch {}
+  // Cache the bulk file at a fixed path so crash-retries don't re-download 545 MB.
+  const tmpFile = path.join(os.tmpdir(), 'deckforge-bulk-cache.json');
+  if (existsSync(tmpFile)) {
+    console.log(`Using cached bulk file → ${tmpFile}`);
+  } else {
+    console.log(`Downloading default_cards (${(entry.size / 1e6).toFixed(0)} MB) → ${tmpFile}`);
+    const cardsRes = await fetch(entry.download_uri, { headers: { 'User-Agent': USER_AGENT } });
+    if (!cardsRes.ok) throw new Error(`default_cards ${cardsRes.status}`);
+    if (!cardsRes.body) throw new Error('default_cards response has no body');
+    await pipeline(Readable.fromWeb(cardsRes.body), createWriteStream(tmpFile));
+    console.log('Download complete. Streaming parse…');
+  }
+  // Stream-parse the top-level JSON array (keep the cache file for resume).
+  const stream = createReadStream(tmpFile).pipe(streamArray.withParserAsStream());
+  for await (const { value } of stream) {
+    yield value;
   }
 }
 
@@ -150,6 +155,22 @@ async function loadExisting(idxPath, binPath) {
   return map;
 }
 
+// Write a resume checkpoint: the art-region hashes computed so far (bin + idx,
+// parallel), so a native crash can pick up where it left off instead of restarting.
+async function writeCheckpoint(binPath, idxPath, idx, hashes, upTo) {
+  const di = [], dh = [];
+  for (let j = 0; j < upTo; j++) { if (hashes[j]) { di.push(idx[j]); dh.push(hashes[j]); } }
+  const count = dh.length;
+  const blob = Buffer.alloc(16 + count * BYTES_PER_HASH);
+  blob.write('DFHB', 0, 4, 'ascii');
+  blob.writeUInt32LE(1, 4);
+  blob.writeUInt32LE(count, 8);
+  blob.writeUInt32LE(BYTES_PER_HASH, 12);
+  for (let j = 0; j < count; j++) blob.set(dh[j], 16 + j * BYTES_PER_HASH);
+  await writeFile(binPath, blob);
+  await writeFile(idxPath, JSON.stringify(di));
+}
+
 async function main() {
   const incremental = process.argv.includes('--incremental');
   // Output goes into mobile/assets/hashes/ so it bundles with the Expo app.
@@ -167,7 +188,14 @@ async function main() {
   const idxPath = path.join(outDir, 'cards.idx');
   const metaPath = path.join(outDir, 'cards.meta.json');
 
-  const existing = incremental ? await loadExisting(idxPath, binPath) : null;
+  // Resume from a crashed run's checkpoint (holds the NEW art-region hashes already
+  // computed). We do NOT reuse the old cards.bin here — its hashes are the old
+  // whole-card region and would corrupt an art-region rebuild.
+  const partialBinPath = path.join(outDir, 'cards.partial.bin');
+  const partialIdxPath = path.join(outDir, 'cards.partial.idx.json');
+  const reuseMap = await loadExisting(partialIdxPath, partialBinPath);
+  if (reuseMap) console.log(`Resuming from checkpoint: ${reuseMap.size} cards already done.`);
+  void incremental;
 
   // Stream-collect every printing that has an image. The card objects from
   // stream-json are full Scryfall card records, but we only keep what we need
@@ -195,7 +223,7 @@ async function main() {
     const results = await Promise.all(batch.map(async (card, k) => {
       const slot = i + k;
       idx[slot] = { id: card.id, name: card.name, set: card.set, cn: card.cn };
-      const reuse = existing?.get(card.id);
+      const reuse = reuseMap?.get(card.id);
       if (reuse) { reused++; return reuse; }
       const h = await hashOne(card);
       if (h) done++;
@@ -210,6 +238,11 @@ async function main() {
       const eta = Math.round((prints.length - i) / Math.max(1, rate));
       console.log(`  ${i + batch.length}/${prints.length} · ${rate.toFixed(1)}/s · ETA ${Math.floor(eta / 60)}m${String(eta % 60).padStart(2, '0')}s · reused ${reused} · new ${done} · skip ${skipped}`);
     }
+    // Checkpoint every ~1800 cards so a crash resumes instead of restarting.
+    if (i > 0 && (i / CONCURRENCY) % 300 === 0) {
+      await writeCheckpoint(partialBinPath, partialIdxPath, idx, hashes, i + batch.length);
+    }
+    if (global.gc && (i / CONCURRENCY) % 50 === 0) global.gc(); // keep native memory bounded
     await sleep(40); // polite pacing between batches
   }
 
@@ -256,6 +289,9 @@ async function main() {
     bytesPerHash: BYTES_PER_HASH,
     sizeMb: +(blob.length / 1e6).toFixed(2),
   }, null, 2));
+
+  // Rebuild complete — remove the resume checkpoint.
+  try { await unlink(partialBinPath); await unlink(partialIdxPath); } catch {}
 
   console.log(`\nWrote ${count} hashes:`);
   console.log(`  ${binPath} (${(blob.length / 1e6).toFixed(2)} MB)`);

@@ -59,16 +59,24 @@ function rectCorners(r: { centerX: number; centerY: number; width: number; heigh
   }));
 }
 
-// dHash on a single-channel (grayscale) buffer — same grid math as the DB build.
+// Art-region crop — MUST stay byte-identical to dhashFromImageData() in
+// web/scripts/build-full-hashes.mjs (same constants + same cell math).
+const ART_X0 = 0.07, ART_X1 = 0.93, ART_Y0 = 0.11, ART_Y1 = 0.58;
+
+// dHash over the card's ART REGION on a single-channel (grayscale) buffer.
+// Byte-identical math to the DB build (which uses the same crop on RGBA luma).
 export function dhashGray(data: Uint8Array, sw: number, sh: number, size = 16): Uint8Array {
+  const ax0 = Math.round(ART_X0 * sw), ax1 = Math.round(ART_X1 * sw);
+  const ay0 = Math.round(ART_Y0 * sh), ay1 = Math.round(ART_Y1 * sh);
+  const rw = ax1 - ax0, rh = ay1 - ay0;
   const gw = size + 1, gh = size;
   const grid = new Float64Array(gw * gh);
   for (let gy = 0; gy < gh; gy++) {
-    const y0 = Math.floor((gy * sh) / gh);
-    const y1 = Math.max(y0 + 1, Math.floor(((gy + 1) * sh) / gh));
+    const y0 = ay0 + Math.floor((gy * rh) / gh);
+    const y1 = ay0 + Math.max(Math.floor((gy * rh) / gh) + 1, Math.floor(((gy + 1) * rh) / gh));
     for (let gx = 0; gx < gw; gx++) {
-      const x0 = Math.floor((gx * sw) / gw);
-      const x1 = Math.max(x0 + 1, Math.floor(((gx + 1) * sw) / gw));
+      const x0 = ax0 + Math.floor((gx * rw) / gw);
+      const x1 = ax0 + Math.max(Math.floor((gx * rw) / gw) + 1, Math.floor(((gx + 1) * rw) / gw));
       let sum = 0, cnt = 0;
       for (let y = y0; y < y1; y++) {
         const row = y * sw;
