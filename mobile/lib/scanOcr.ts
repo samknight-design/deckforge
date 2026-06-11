@@ -26,12 +26,15 @@ export async function ensureNameIndex(): Promise<void> {
     const { db, names } = await prepareScanDb();
     const exact = new Map<string, number>();
     const list: NameEntry[] = [];
+    const CHUNK = 6000;
     for (let i = 0; i < db.count; i++) {
       const nm = nameAt(names, i);
-      if (!nm) continue;
-      const norm = normalize(nm);
-      if (norm.length < 3) continue;
-      if (!exact.has(norm)) { exact.set(norm, i); list.push({ norm, idx: i }); }
+      if (nm) {
+        const norm = normalize(nm);
+        if (norm.length >= 3 && !exact.has(norm)) { exact.set(norm, i); list.push({ norm, idx: i }); }
+      }
+      // Yield periodically so building the dictionary never blocks camera frames.
+      if (i % CHUNK === CHUNK - 1) await new Promise(r => setTimeout(r, 0));
     }
     nameIndex = { exact, list };
   })();

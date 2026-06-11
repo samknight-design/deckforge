@@ -69,8 +69,8 @@ const LIVE_AUTOSCAN = true;
 // dist ≤ this counts as a confident match. gap is NOT used — reprints share
 // artwork, so the runner-up is often another printing of the SAME card (gap≈0).
 const AUTO_MAX_DIST        = 72;
-const AI_ESCALATE_MS       = 2500;  // card steady-but-unmatched this long → auto AI scan
-const STABLE_FRAMES_NEEDED = 3;     // card centroid steady this many detections → lock
+const AI_ESCALATE_MS       = 3500;  // give the art-fingerprint a real chance before escalating
+const STABLE_FRAMES_NEEDED = 3;     // back to the known-good measured-run value
 const FRAME_THROTTLE       = 3;     // run the detector every Nth frame
 const SCAN_COOLDOWN_MS     = 1500;  // pause after a hit before re-arming
 const MAX_FREE_AI_SCANS    = 10;
