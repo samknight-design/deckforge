@@ -196,7 +196,7 @@ function rectCornersW(r: { centerX: number; centerY: number; width: number; heig
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type Engine = 'local' | 'smart';
+type Engine = 'local' | 'smart' | 'ocr';
 
 type ScannedCard = {
   scryfall_id: string;
@@ -257,7 +257,8 @@ export default function CameraView({
   // deck picker can be opened from top bar (quick) or result sheet (review)
   const [deckPickerVisible, setDeckPickerVisible] = useState(false);
   const [aiScansUsed, setAiScansUsed]       = useState(0);
-  const [aiThinking, setAiThinking]         = useState(false); // "✨ Asking AI…" indicator
+  const [aiThinking, setAiThinking]         = useState(false); // escalation in progress (highlights viewfinder)
+  const [escalateMsg, setEscalateMsg]       = useState<string | null>(null); // "🔤 Reading text…" / "✨ Asking AI…"
   const [reading, setReading]               = useState(false); // "🔍 Reading card…" (card detected, working)
   const readingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // quick mode: flash notification
@@ -356,6 +357,9 @@ export default function CameraView({
         setDbIds(ids);
         setDbNames(names);
         dbReady.value = true;
+        // Warm up the OCR name dictionary in the background so the first
+        // escalation isn't delayed building it.
+        import('../lib/scanOcr').then(m => m.ensureNameIndex()).catch(() => {});
       })
       .catch((e) => {
         console.warn('[scan] DB load failed:', e);
@@ -398,47 +402,72 @@ export default function CameraView({
     });
   }, [userId, showXp]);
 
-  // Snapshot → AI Smart Scan. Used as the automatic escalation when on-device
-  // can't read a card, and by the manual Force Scan. Returns true if identified.
-  const runAiScan = useCallback(async (): Promise<boolean> => {
-    if (!cameraRef.current) return false;
+  // AI Smart Scan on an already-captured snapshot (reused from the escalation).
+  const runAiScan = useCallback(async (fileUri: string): Promise<boolean> => {
     if (aiScansUsed >= MAX_FREE_AI_SCANS) {
       showNotif({ type: 'warn', text: 'AI assists used up today', sub: 'Upgrade to Pro for unlimited' });
       return false;
     }
-    if (mounted.current) setAiThinking(true);
+    setAiScansUsed(n => n + 1);
     try {
-      const photo = await cameraRef.current.takeSnapshot({ quality: 60 });
-      const fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
-      setAiScansUsed(n => n + 1);
       const formData = new FormData();
       (formData as any).append('image', { uri: fileUri, type: 'image/jpeg', name: 'scan.jpg' });
       const res = await apiFetch('/api/scan', { method: 'POST', body: formData });
       const data = await res.json().catch(() => ({}));
-      console.log(`[ai] escalated → ${res.ok && data?.card ? data.card.card_name : 'no match'}`);
+      console.log(`[ai] → ${res.ok && data?.card ? data.card.card_name : 'no match'}`);
       if (res.ok && data?.card) {
         const card = data.card;
         if (quickMode) {
           await doAdd({ scryfall_id: card.scryfall_id, card_name: card.card_name }, false, currentDeck);
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-          showNotif({
-            type: currentDeck ? 'success' : 'warn',
-            text: card.card_name,
-            sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
-            engine: 'smart',
-          });
+          showNotif({ type: currentDeck ? 'success' : 'warn', text: card.card_name, sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library', engine: 'smart' });
         } else {
           setResult({ ...card, _engine: 'smart' });
         }
         return true;
       }
       return false;
-    } catch {
-      return false;
-    } finally {
-      if (mounted.current) setAiThinking(false);
-    }
+    } catch { return false; }
   }, [aiScansUsed, quickMode, currentDeck, doAdd, showNotif]);
+
+  // Escalation ladder when the live art-fingerprint can't read a card:
+  //   snapshot → on-device OCR name-match (free) → AI Smart Scan (rare).
+  const escalate = useCallback(async (): Promise<boolean> => {
+    if (!cameraRef.current) return false;
+    let fileUri: string;
+    try {
+      const photo = await cameraRef.current.takeSnapshot({ quality: 60 });
+      fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
+    } catch { return false; }
+
+    if (mounted.current) { setAiThinking(true); setEscalateMsg('🔤 Reading text…'); }
+    try {
+      // Tier 2 — read the card name (free, on-device).
+      try {
+        const { ocrMatch } = await import('../lib/scanOcr');
+        const ocr = await ocrMatch(fileUri);
+        if (ocr) {
+          console.log(`[ocr] ${ocr.via} ${ocr.score.toFixed(2)} → ${ocr.name}`);
+          if (quickMode) {
+            await doAdd({ scryfall_id: ocr.id, card_name: ocr.name }, false, currentDeck);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+            showNotif({ type: currentDeck ? 'success' : 'warn', text: ocr.name, sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library', engine: 'ocr' });
+          } else {
+            setResult({ scryfall_id: ocr.id, card_name: ocr.name, _engine: 'ocr' });
+            apiFetch('/api/scan/resolve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scryfall_id: ocr.id }) })
+              .then(r => r.json()).then(d => { if (d?.card && mounted.current) setResult(prev => (prev ? { ...prev, ...d.card } : prev)); }).catch(() => {});
+          }
+          return true;
+        }
+      } catch (e) { console.warn('[ocr] error', e); }
+
+      // Tier 3 — AI (rare anomalies). Reuse the same snapshot.
+      if (mounted.current) setEscalateMsg('✨ Asking AI…');
+      return await runAiScan(fileUri);
+    } finally {
+      if (mounted.current) { setAiThinking(false); setEscalateMsg(null); }
+    }
+  }, [quickMode, currentDeck, doAdd, showNotif, runAiScan]);
 
   // ── Core: resolve a match index to a full card, then act on mode ───────────
 
@@ -511,7 +540,7 @@ export default function CameraView({
       if (rejectSince.current === 0) rejectSince.current = now;
       if (now - rejectSince.current >= AI_ESCALATE_MS) {
         rejectSince.current = 0;
-        const ok = await runAiScan();
+        const ok = await escalate();
         resetScanner(ok ? SCAN_COOLDOWN_MS : 1200);
         return;
       }
@@ -548,7 +577,7 @@ export default function CameraView({
         if (d?.card && mounted.current) setResult(prev => (prev ? { ...prev, ...d.card } : prev));
       }).catch(() => {});
     }
-  }, [dbFlat, dbCount, dbIds, dbNames, quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked, runAiScan]);
+  }, [dbFlat, dbCount, dbIds, dbNames, quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked, escalate]);
 
   // Review mode: user confirms the card in the sheet
   const onReviewAdd = useCallback(async () => {
@@ -888,7 +917,7 @@ export default function CameraView({
           <Text style={S.vfHint}>
             {loadError ? `⚠️ Load failed: ${loadError}`
               : !dbLoaded ? `⏳ ${loadStage}`
-              : aiThinking ? '✨ Asking AI…'
+              : escalateMsg ? escalateMsg
               : resolving ? '⚡ Saving…'
               : manualScanning ? '⚡ Reading card…'
               : reading ? '🔍 Reading card… hold steady'
@@ -926,7 +955,7 @@ export default function CameraView({
           </Text>
           {scanNotif.sub && (
             <Text style={[S.notifSub, { color: NOTIF_C[scanNotif.type].fg }]}>
-              {scanNotif.engine === 'smart' ? '✨ AI Smart Scan  ·  ' : scanNotif.engine === 'local' ? '⚡ On-device  ·  ' : ''}{scanNotif.sub}
+              {scanNotif.engine === 'smart' ? '✨ AI Smart Scan  ·  ' : scanNotif.engine === 'ocr' ? '🔤 Name match  ·  ' : scanNotif.engine === 'local' ? '⚡ On-device  ·  ' : ''}{scanNotif.sub}
             </Text>
           )}
         </Animated.View>
@@ -956,7 +985,7 @@ export default function CameraView({
               }
               <View style={{ flex: 1 }}>
                 <Text style={[S.engineBadge, result._engine === 'smart' ? S.engineSmart : S.engineLocal]}>
-                  {result._engine === 'smart' ? '✨ AI Smart Scan' : '⚡ On-device match'}
+                  {result._engine === 'smart' ? '✨ AI Smart Scan' : result._engine === 'ocr' ? '🔤 Name match' : '⚡ On-device match'}
                 </Text>
                 {result._dist != null && (
                   <Text style={S.debugLine}>
