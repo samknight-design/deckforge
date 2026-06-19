@@ -17,6 +17,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Dimensions,
   Image,
   Pressable,
   StyleSheet,
@@ -48,8 +49,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { apiFetch } from '../lib/api';
 import { addCardToDeck, addToLibrary, type Deck } from '../lib/db';
 import { prepareScanDb, idAt, nameAt } from '../lib/scanLocal';
-import { dhashGray, reversed } from '../lib/scanOpenCV';
-import { matchHash } from '@deckforge/shared/cardScan';
+import { bestMatchMultiCrop } from '../lib/scanOpenCV';
 import { useTheme } from '../lib/theme';
 import { tryCompleteChallenge } from '../lib/challenges';
 import { useXpToast } from '../lib/xpToast';
@@ -59,19 +59,56 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'opencv-v6';
+const BUILD_TAG = 'fluid-v4';
 
 // Continuous auto-scan: native OpenCV detects + flattens the card every (throttled)
 // frame on the camera thread; the heavy 114k match runs once on the JS thread only
 // when a card is held steady. No snapshot, no per-frame full-DB scan, no freeze.
+// DISABLED during the Phase A embedding trial: the live frame processor + takeSnapshot
+// crashes the Samsung camera session ("Error configuring streams: Broken pipe"), and
+// for validating the matcher we use tap-to-scan with a fixed guide box instead.
 const LIVE_AUTOSCAN = true;
+
+// TUNING SWITCH — while we perfect on-device detection, escalation (OCR + AI) is
+// OFF so every card must be carried by the art-hash alone. This gives a clean
+// signal (no fallback hiding a bad warp) AND avoids the mid-stream takeSnapshot
+// that was destabilising the camera session. Flip back ON to ship the polish.
+const ESCALATION_ENABLED = false;
+
+// DIAGNOSTIC — when true, every warped card image the matcher sees is saved to
+// the app cache as a JPEG (throttled) so we can pull it and inspect exactly what
+// the hash is computed from. Turn OFF for normal use.
+const DUMP_WARP = false;
+// DIAGNOSTIC — dump the COLOUR 256×256 crop the corner-model live path feeds to
+// SigLIP, so we can pull it and see orientation/quality (the box can hug a card
+// while the warp comes out upside-down → recognition fails). Turn OFF for normal use.
+const DUMP_LIVE = false;
+
+// PHASE A (embedding scanner trial) — when true, the Force Scan button captures a
+// COLOUR card crop and POSTs it to the local SigLIP2 match server (reachable via
+// `adb reverse tcp:8765`) instead of the on-device dHash path. Temporary test
+// scaffold to validate embedding accuracy on real captures before building the
+// on-device model. Turn OFF to restore the normal dHash Force Scan.
+// ON-DEVICE embedding match (no server) — runs SigLIP2 + the 115k index on the phone.
+// Takes priority over SERVER_MATCH when true.
+const ONDEVICE_MATCH = true;
+const SERVER_MATCH = true;
+const MATCH_SERVER_URL = 'http://localhost:8765/match';
+// Embedding cosine confidence gate. Measured on real captures: correct matches
+// ≥0.73, wrong matches ~0.63. Accept ≥ this, else ask for a realign+retry — so a
+// bad/loose capture fails LOUD instead of adding the wrong card. Tune with data.
+// Real cards (CPU encoder) score 0.856–0.918; fakes/garbage/bad-crops ≤0.75.
+// 0.82 sits in the clean gap → genuine cards accept, a hand-drawn fake or loose
+// crop is rejected ("realign & retry") instead of being force-matched. This is the
+// rejection ManaBox does — it only commits when it's actually confident.
+const CONF_MIN = 0.82;
 
 // dist ≤ this counts as a confident match. gap is NOT used — reprints share
 // artwork, so the runner-up is often another printing of the SAME card (gap≈0).
 const AUTO_MAX_DIST        = 72;
 const AI_ESCALATE_MS       = 3500;  // give the art-fingerprint a real chance before escalating
 const STABLE_FRAMES_NEEDED = 3;     // back to the known-good measured-run value
-const FRAME_THROTTLE       = 3;     // run the detector every Nth frame
+const FRAME_THROTTLE       = 1;     // liveBusy lock is the real gate now; no artificial spacing
 const SCAN_COOLDOWN_MS     = 1500;  // pause after a hit before re-arming
 const MAX_FREE_AI_SCANS    = 10;
 
@@ -82,6 +119,34 @@ const WARP_H        = 204;
 const MIN_AREA_FRAC = 0.08;         // card quad must cover ≥8% of the frame
 const ASPECT_LO     = 0.55;         // card ratio 63/88 ≈ 0.716
 const ASPECT_HI     = 0.92;
+
+// ── Lock-on HUD ────────────────────────────────────────────────────────────────
+// The tracking box springs from this centred resting size onto the detected card.
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+const BOX_W = 232;                  // resting HUD box size (matches old viewfinder)
+const BOX_H = 324;
+// Frame(proc, landscape) → portrait screen mapping. The back camera sensor is
+// rotated 90° vs the display; we rotate counter-clockwise (matches observed
+// tracking) then COVER-scale with a SINGLE factor so the box keeps the card's
+// true aspect ratio (per-axis fraction mapping squashed it). Flips are
+// calibration knobs — toggle on device if the box mirrors the card.
+const MAP_FLIP_X = false;           // flip the horizontal (screen-X) axis
+const MAP_FLIP_Y = false;           // flip the vertical   (screen-Y) axis
+
+// Minimal base64 encoder (no Buffer polyfill dependency) — used by the warp dump.
+function bytesToBase64(bytes: Uint8Array): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  let i = 0;
+  for (; i + 2 < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + chars[(n >> 6) & 63] + chars[n & 63];
+  }
+  const rem = bytes.length - i;
+  if (rem === 1) { const n = bytes[i] << 16; out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + '=='; }
+  else if (rem === 2) { const n = (bytes[i] << 16) | (bytes[i + 1] << 8); out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + chars[(n >> 6) & 63] + '='; }
+  return out;
+}
 
 // ── Worklet helpers ───────────────────────────────────────────────────────────
 // Run on the camera thread — no external imports, all logic self-contained.
@@ -196,7 +261,7 @@ function rectCornersW(r: { centerX: number; centerY: number; width: number; heig
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type Engine = 'local' | 'smart' | 'ocr';
+type Engine = 'local' | 'smart' | 'ocr' | 'embed';
 
 type ScannedCard = {
   scryfall_id: string;
@@ -237,6 +302,12 @@ export default function CameraView({
   const cameraRef = useRef<Camera>(null);
   const notifTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rejectSince = useRef(0); // when a steady card first failed to match (for AI escalation)
+  const lastDumpAt = useRef(0);  // throttle for the DUMP_WARP diagnostic
+  const dumpIdx = useRef(0);     // rotating filename index for warp dumps
+  const lastQuadCx = useRef(0);  // last corner-model quad centroid (frame space, stability)
+  const lastQuadCy = useRef(0);
+  const emaPts = useRef<Array<{ x: number; y: number }>>([]); // EMA-smoothed box corners (frame space)
+  const emaValid = useRef(false); // false → next detection seeds the EMA (no drag from a stale lock)
 
   // Crisp preview (720p). The dhash worklet samples with a stride, so its cost
   // stays bounded regardless of frame resolution — no need to cripple the preview.
@@ -274,6 +345,7 @@ export default function CameraView({
 
   // On-screen diagnostics (the user can't read Metro logs)
   const [loadStage, setLoadStage] = useState('Starting…');
+  const [embedStatus, setEmbedStatus] = useState(ONDEVICE_MATCH ? 'on-device: loading…' : '');
   const [loadError, setLoadError] = useState<string | null>(null);
   // 'unknown' until the frame processor runs once; 'active' if raw pixels work,
   // 'unavailable' if frame.toArrayBuffer() throws (needs the minSdkVersion-26 build)
@@ -282,6 +354,8 @@ export default function CameraView({
   // times per second from the frame processor, so we can see how close matches are.
   const [liveDist, setLiveDist] = useState<number | null>(null);
   const [liveGap, setLiveGap]   = useState<number | null>(null);
+  // 0 = no card, 1 = card detected (unsteady), 2 = stable/locked
+  const [alignState, setAlignState] = useState<0 | 1 | 2>(0);
   const [popcountTable]       = useState<number[]>(() => {
     const t = new Array(256); t[0] = 0;
     for (let i = 1; i < 256; i++) t[i] = (i & 1) + t[i >> 1];
@@ -297,14 +371,95 @@ export default function CameraView({
   const fpErrReported    = useSharedValue(false); // report a worklet error only once
   const frameTick        = useSharedValue(0);     // throttle counter
   const dbReady          = useSharedValue(false);  // gate (avoids capturing 3.5MB in the worklet)
+  const embedReady       = useSharedValue(false);  // gate: embedding model + index fully loaded
+  const liveBusy         = useSharedValue(false);  // corner pipeline in-flight → worklet skips marshalling
   const lastCx           = useSharedValue(0);      // last detected card centroid (stability)
   const lastCy           = useSharedValue(0);
   const stableCount      = useSharedValue(0);      // consecutive steady detections
+  const alignSV          = useSharedValue(0);      // mirrors alignState in the worklet (avoids per-frame JS calls)
 
   // Called from the worklet (once) to report whether raw-pixel access works.
   const reportFp = useRunOnJS((ok: boolean) => {
     if (mounted.current) setFpStatus(ok ? 'active' : 'unavailable');
   }, []);
+
+  // ── Lock-on tracking box (native-driver transforms; no per-frame re-render) ──
+  // A single outlined rect that springs from centre onto the detected card.
+  const trackTX = useRef(new Animated.Value(0)).current;  // translateX from centre
+  const trackTY = useRef(new Animated.Value(0)).current;  // translateY from centre
+  const trackSX = useRef(new Animated.Value(1)).current;  // scaleX vs BOX_W
+  const trackSY = useRef(new Animated.Value(1)).current;  // scaleY vs BOX_H
+  const trackRot = useRef(new Animated.Value(0)).current; // rotation (deg) to match card tilt
+  const lastAlign = useRef(0);
+  const lastRot = useRef(0);
+  // Actual rendered preview size (measured) — the camera draws edge-to-edge, which
+  // is LARGER than Dimensions.get('window') (that excludes the status bar). Using
+  // the real size is what makes the overlay land exactly on the card.
+  const viewSize = useRef({ w: SCREEN_W, h: SCREEN_H });
+
+  const springTo = useCallback((tx: number, ty: number, sx: number, sy: number, rot = 0) => {
+    // Snappier than before (higher tension, a touch more friction to avoid overshoot)
+    // so the box tracks the card rather than lagging behind it. EMA upstream removes
+    // the jitter that a stiff spring would otherwise amplify.
+    const cfg = { useNativeDriver: true, friction: 9, tension: 130 } as const;
+    Animated.spring(trackTX, { toValue: tx, ...cfg }).start();
+    Animated.spring(trackTY, { toValue: ty, ...cfg }).start();
+    Animated.spring(trackSX, { toValue: sx, ...cfg }).start();
+    Animated.spring(trackSY, { toValue: sy, ...cfg }).start();
+    Animated.spring(trackRot, { toValue: rot, ...cfg }).start();
+  }, [trackTX, trackTY, trackSX, trackSY, trackRot]);
+
+  // Map one processed-frame point → portrait-screen point. Rotates the landscape
+  // frame counter-clockwise (rotW=ph, rotH=pw) then COVER-scales with a SINGLE
+  // factor (+ centre crop), so aspect is preserved exactly.
+  const mapPoint = useCallback((fx: number, fy: number, pw: number, ph: number) => {
+    const VW = viewSize.current.w, VH = viewSize.current.h;
+    const rotW = ph, rotH = pw;
+    let rx = fy;            // CCW: new-x = old-y
+    let ry = pw - fx;       // CCW: new-y = (oldW - old-x)
+    if (MAP_FLIP_X) rx = rotW - rx;
+    if (MAP_FLIP_Y) ry = rotH - ry;
+    const s = Math.max(VW / rotW, VH / rotH);
+    return { x: rx * s - (rotW * s - VW) / 2, y: ry * s - (rotH * s - VH) / 2 };
+  }, []);
+
+  // Called from the worklet EVERY detected frame with the FOUR ordered card
+  // corners (proc px) + frame dims + alignment state. Fits a rotated rectangle to
+  // the real corners → true centre, true size, true tilt (no bounding-box drift).
+  const reportCard = useRunOnJS((
+    x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, x3: number, y3: number,
+    pw: number, ph: number, state: number,
+  ) => {
+    if (!mounted.current) return;
+    const p0 = mapPoint(x0, y0, pw, ph), p1 = mapPoint(x1, y1, pw, ph);
+    const p2 = mapPoint(x2, y2, pw, ph), p3 = mapPoint(x3, y3, pw, ph);
+    const cx = (p0.x + p1.x + p2.x + p3.x) / 4;
+    const cy = (p0.y + p1.y + p2.y + p3.y) / 4;
+    const d = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
+    const w = (d(p0, p1) + d(p2, p3)) / 2;   // top/bottom edges = card width
+    const h = (d(p1, p2) + d(p3, p0)) / 2;   // side edges = card height
+    // Tilt from the top edge; normalise via 180° symmetry to avoid spin jumps.
+    let ang = (Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180) / Math.PI;
+    while (ang - lastRot.current > 90) ang -= 180;
+    while (ang - lastRot.current < -90) ang += 180;
+    lastRot.current = ang;
+    springTo(
+      cx - viewSize.current.w / 2,
+      cy - viewSize.current.h / 2,
+      Math.max(0.2, Math.min(2.4, w / BOX_W)),
+      Math.max(0.2, Math.min(2.4, h / BOX_H)),
+      ang,
+    );
+    if (state !== lastAlign.current) { lastAlign.current = state; setAlignState(state as 0 | 1 | 2); }
+  }, [springTo, mapPoint]);
+
+  // Called from the worklet when no card is in view → box glides back to centre.
+  const onNoCard = useRunOnJS(() => {
+    if (!mounted.current) return;
+    lastRot.current = 0;
+    springTo(0, 0, 1, 1, 0);
+    if (lastAlign.current !== 0) { lastAlign.current = 0; setAlignState(0); }
+  }, [springTo]);
 
   // Called from the worklet (throttled) with the live best distance/gap.
   const reportMatch = useRunOnJS((dist: number, gap: number) => {
@@ -376,6 +531,18 @@ export default function CameraView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Warm up the on-device embedding model + index (loads ~280MB; takes a few sec).
+  useEffect(() => {
+    if (!ONDEVICE_MATCH) return;
+    import('../lib/embedScan')
+      .then(m => m.initEmbedScan(s => { if (mounted.current) setEmbedStatus(s); }))
+      .then(() => { embedReady.value = true; })
+      .catch(e => {
+        console.log('[embed-init-error]', e?.message || String(e), e?.stack || '');
+        if (mounted.current) setEmbedStatus('embed init failed: ' + (e?.message || e));
+      });
+  }, []);
+
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   const resetScanner = useCallback((delayMs = 0) => {
@@ -384,10 +551,15 @@ export default function CameraView({
       scanBlocked.value = false;
       consecutiveCount.value = 0;
       lastMatchIndex.value = -1;
+      alignSV.value = 0;
+      stableCount.value = 0;
+      lastAlign.current = 0;
+      setAlignState(0);
+      springTo(0, 0, 1, 1);  // glide the lock-on box back to centre
     };
     if (delayMs > 0) setTimeout(go, delayMs);
     else go();
-  }, [scanBlocked, consecutiveCount, lastMatchIndex]);
+  }, [scanBlocked, consecutiveCount, lastMatchIndex, alignSV, stableCount, springTo]);
 
   const doAdd = useCallback(async (card: ScannedCard, foil: boolean, deck: Deck | undefined) => {
     await addToLibrary(userId, { scryfall_id: card.scryfall_id, card_name: card.card_name }, foil).catch(() => {});
@@ -515,6 +687,32 @@ export default function CameraView({
     }
   }, [dbIds, quickMode, currentDeck, doAdd, showNotif, resetScanner]);
 
+  // DIAGNOSTIC — encode the warped grayscale image (exactly what the hash sees)
+  // to a JPEG in the app cache, so it can be pulled off-device and inspected.
+  const dumpWarp = useCallback(async (buf: number[], w: number, h: number, label: string) => {
+    const now = Date.now();
+    if (now - lastDumpAt.current < 900) return; // throttle
+    lastDumpAt.current = now;
+    try {
+      // jpeg-js is a Node lib that expects a GLOBAL Buffer — RN has none, so
+      // install one before importing it (a module-local import won't satisfy it).
+      const g = global as any;
+      if (typeof g.Buffer === 'undefined') g.Buffer = require('buffer').Buffer;
+      const jpeg = await import('jpeg-js');
+      const rgba = new Uint8Array(w * h * 4);
+      for (let i = 0; i < w * h; i++) {
+        const v = buf[i] & 0xff;
+        rgba[i * 4] = v; rgba[i * 4 + 1] = v; rgba[i * 4 + 2] = v; rgba[i * 4 + 3] = 255;
+      }
+      const enc = (jpeg as any).encode({ data: rgba, width: w, height: h }, 90);
+      const b64 = bytesToBase64(enc.data as Uint8Array);
+      const idx = dumpIdx.current % 6; dumpIdx.current++;
+      const uri = `${FileSystem.cacheDirectory}warp_${idx}_${label}.jpg`;
+      await FileSystem.writeAsStringAsync(uri, b64, { encoding: FileSystem.EncodingType.Base64 });
+      console.log(`[warp-dump] saved ${uri}`);
+    } catch (e) { console.warn('[warp-dump] failed', e); }
+  }, []);
+
   // Called from the worklet when a steady card has been detected + flattened.
   // Runs the 114k match on the JS thread (fast, off the camera thread), then
   // auto-adds (quick) or opens the review sheet — using LOCAL names, NO network.
@@ -527,14 +725,30 @@ export default function CameraView({
     readingTimer.current = setTimeout(() => { if (mounted.current) setReading(false); }, 900);
     const u8 = Uint8Array.from(buf);
     const db = { count: dbCount, bytesPerHash: 32, flat: dbFlat };
-    const m0 = matchHash(dhashGray(u8, w, h), db);
-    const m180 = matchHash(dhashGray(reversed(u8), w, h), db);
-    const m = m180.distance < m0.distance ? m180 : m0;
+    // Multi-crop match: tolerant to small warp misalignment (margin/shift/rotation
+    // from a loose tier-2 detection on dark/borderless cards).
+    const m = bestMatchMultiCrop(u8, w, h, db, AUTO_MAX_DIST);
     setLiveDist(m.distance); setLiveGap(m.runnerUp - m.distance);
     const nmDbg = (dbNames && nameAt(dbNames, m.index)) || '?';
     console.log(`[live] best=${nmDbg} dist=${m.distance} tier=${tier} → ${m.distance <= AUTO_MAX_DIST ? 'ADD' : 'skip'}`);
+    if (DUMP_WARP) dumpWarp(buf, w, h, `d${m.distance}t${tier}`);
 
     if (m.distance > AUTO_MAX_DIST) {
+      if (!ESCALATION_ENABLED) {
+        // Pure-hash tuning mode: no OCR/AI. Most "misses" are transient (the warp
+        // lands on a good crop a frame later), so DON'T red-flash every one — keep
+        // retrying silently and only surface a failure after sustained inability.
+        const now = Date.now();
+        if (rejectSince.current === 0) rejectSince.current = now;
+        if (now - rejectSince.current >= AI_ESCALATE_MS) {
+          rejectSince.current = 0;
+          showNotif({ type: 'error', text: 'No match', sub: `closest dist ${m.distance}` });
+          resetScanner(900);
+          return;
+        }
+        resetScanner(350);
+        return;
+      }
       // A steady card that won't match locally → after a few seconds, hand to AI.
       const now = Date.now();
       if (rejectSince.current === 0) rejectSince.current = now;
@@ -579,6 +793,192 @@ export default function CameraView({
     }
   }, [dbFlat, dbCount, dbIds, dbNames, quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked, escalate]);
 
+  // Called from the worklet (throttled) with a 256×256 RGB frame + the camera frame
+  // dims. THIS is the corner-model ("YOLO") live path: run the learned corner
+  // detector on the JS thread → smooth quad that hugs the card → drive the lock-on
+  // box → stability gate → warp → embed → add. No OpenCV edge detection, no
+  // takeSnapshot. cornerBusy guards against overlapping model runs.
+  const onCornerFrame = useRunOnJS(async (rgbArr: number[], fw: number, fh: number) => {
+    // liveBusy was already claimed by the worklet; release it on every exit path
+    // (the finally below) so the camera thread can ship the next frame.
+    if (!mounted.current || scanBlocked.value) { liveBusy.value = false; return; }
+    try {
+      const rgb = Uint8Array.from(rgbArr);
+      const { detectCorners } = await import('../lib/embedScan');
+      const corners = await detectCorners(rgb, 256, 3); // [tl,tr,br,bl] in 256 space
+      if (!corners) { emaValid.current = false; onNoCard(); return; }
+
+      // Map 256-square model coords → upright-portrait-frame coords. The worklet
+      // rotated the frame to portrait then auto centre-square-cropped before resizing
+      // to 256, so undo that square crop here. fw/fh are the ROTATED frame dims.
+      const sq = Math.min(fw, fh);
+      const cropX = (fw - sq) / 2, cropY = (fh - sq) / 2;
+      const fpt = corners.map(([mx, my]) => ({ x: cropX + (mx / 256) * sq, y: cropY + (my / 256) * sq }));
+
+      // Plausibility gate: a real card quad is portrait-ish and a sensible size.
+      // Rejects the degenerate quad the model emits on an empty table → no false box.
+      const dd = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
+      const qw = (dd(fpt[0], fpt[1]) + dd(fpt[3], fpt[2])) / 2;
+      const qh = (dd(fpt[0], fpt[3]) + dd(fpt[1], fpt[2])) / 2;
+      const aspect = Math.min(qw, qh) / Math.max(qw, qh);
+      const areaFrac = (qw * qh) / (sq * sq);
+      // A real card warps to ~0.716; allow a band for perspective. Reject near-square
+      // quads (>0.88) — that's the loose box the model emits on non-cards (the fake
+      // drawing came in at 0.94), so we don't even attempt a match on those.
+      if (aspect < 0.5 || aspect > 0.88 || areaFrac < 0.12 || areaFrac > 1.25) {
+        stableCount.value = 0;
+        emaValid.current = false;
+        onNoCard();
+        return;
+      }
+
+      // Drive the lock-on box. The frame is already upright portrait, so map to the
+      // portrait screen with a single COVER-scale + centre-crop (no rotation).
+      const VW = viewSize.current.w, VH = viewSize.current.h;
+      const mscale = Math.max(VW / fw, VH / fh);
+      const mp = (p: { x: number; y: number }) => ({
+        x: p.x * mscale - (fw * mscale - VW) / 2,
+        y: p.y * mscale - (fh * mscale - VH) / 2,
+      });
+      // EMA-smooth the corners (frame space) for a jitter-free, gliding hug. The raw
+      // fpt is still used for stability + the warp crop (precision matters there); only
+      // the visible BOX is smoothed. Seeding on first detection avoids a slide-in.
+      const A = 0.5; // higher = snappier, lower = smoother
+      if (!emaValid.current || emaPts.current.length !== 4) {
+        emaPts.current = fpt.map((p) => ({ x: p.x, y: p.y }));
+        emaValid.current = true;
+      } else {
+        for (let i = 0; i < 4; i++) {
+          emaPts.current[i].x += A * (fpt[i].x - emaPts.current[i].x);
+          emaPts.current[i].y += A * (fpt[i].y - emaPts.current[i].y);
+        }
+      }
+      const spt = emaPts.current;
+      const p0 = mp(spt[0]), p1 = mp(spt[1]), p2 = mp(spt[2]), p3 = mp(spt[3]);
+      const cx = (p0.x + p1.x + p2.x + p3.x) / 4, cy = (p0.y + p1.y + p2.y + p3.y) / 4;
+      const sw = (dd(p0, p1) + dd(p2, p3)) / 2, sh = (dd(p1, p2) + dd(p3, p0)) / 2;
+      let ang = (Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180) / Math.PI;
+      while (ang - lastRot.current > 90) ang -= 180;
+      while (ang - lastRot.current < -90) ang += 180;
+      lastRot.current = ang;
+
+      // Stability in frame space (centroid steadiness over consecutive frames).
+      const qcx = (fpt[0].x + fpt[1].x + fpt[2].x + fpt[3].x) / 4;
+      const qcy = (fpt[0].y + fpt[1].y + fpt[2].y + fpt[3].y) / 4;
+      const moved = Math.abs(qcx - lastQuadCx.current) + Math.abs(qcy - lastQuadCy.current);
+      lastQuadCx.current = qcx; lastQuadCy.current = qcy;
+      stableCount.value = moved < sq * 0.04 ? stableCount.value + 1 : 1;
+      const fState = stableCount.value >= STABLE_FRAMES_NEEDED ? 2 : 1;
+      springTo(
+        cx - viewSize.current.w / 2, cy - viewSize.current.h / 2,
+        Math.max(0.2, Math.min(2.4, sw / BOX_W)), Math.max(0.2, Math.min(2.4, sh / BOX_H)), ang,
+      );
+      if (fState !== lastAlign.current) { lastAlign.current = fState; setAlignState(fState as 0 | 1 | 2); }
+
+      if (stableCount.value < STABLE_FRAMES_NEEDED) return;
+
+      // Locked + steady → warp the card flat and embed.
+      scanBlocked.value = true;
+      stableCount.value = 0;
+      setReading(true);
+      if (readingTimer.current) clearTimeout(readingTimer.current);
+      readingTimer.current = setTimeout(() => { if (mounted.current) setReading(false); }, 900);
+
+      const { warpQuadColor } = await import('../lib/scanOpenCV');
+      const rgba = warpQuadColor(rgb, 256, 3, corners, 256);
+
+      // DIAGNOSTIC: save the exact colour crop SigLIP sees, so we can inspect
+      // orientation/quality off-device. Also dump the rotated input frame once.
+      if (DUMP_LIVE) {
+        try {
+          const g: any = global as any;
+          if (typeof g.Buffer === 'undefined') g.Buffer = require('buffer').Buffer;
+          const jpeg = await import('jpeg-js');
+          const idx = dumpIdx.current % 6; dumpIdx.current++;
+          const encCrop = (jpeg as any).encode({ data: rgba, width: 256, height: 256 }, 85);
+          await FileSystem.writeAsStringAsync(
+            `${FileSystem.cacheDirectory}live_crop_${idx}.jpg`,
+            bytesToBase64(encCrop.data as Uint8Array), { encoding: FileSystem.EncodingType.Base64 });
+          // rotated input frame (rgb → rgba) to verify the 90° rotation direction
+          const frameRgba = new Uint8Array(256 * 256 * 4);
+          for (let p = 0; p < 256 * 256; p++) {
+            frameRgba[p * 4] = rgb[p * 3]; frameRgba[p * 4 + 1] = rgb[p * 3 + 1];
+            frameRgba[p * 4 + 2] = rgb[p * 3 + 2]; frameRgba[p * 4 + 3] = 255;
+          }
+          const encFrame = (jpeg as any).encode({ data: frameRgba, width: 256, height: 256 }, 80);
+          await FileSystem.writeAsStringAsync(
+            `${FileSystem.cacheDirectory}live_frame_${idx}.jpg`,
+            bytesToBase64(encFrame.data as Uint8Array), { encoding: FileSystem.EncodingType.Base64 });
+          console.log(`[live-dump] live_crop_${idx}.jpg / live_frame_${idx}.jpg`);
+        } catch (e) { console.warn('[live-dump] failed', e); }
+      }
+
+      const { embedAndMatch } = await import('../lib/embedScan');
+      let { matches, embMs, matchMs } = await embedAndMatch(rgba, 256);
+      let top = matches[0];
+      let conf = top?.score ?? 0;
+      let orient = 0;
+      // SigLIP is orientation-sensitive and the index is upright-only. If the first
+      // pass isn't confident, try the 180°-rotated crop — this absorbs a wrong
+      // rotation direction in the worklet AND cards physically held upside-down.
+      if (conf < CONF_MIN) {
+        const N = 256 * 256;
+        const rgba180 = new Uint8Array(rgba.length);
+        for (let p = 0; p < N; p++) {
+          const s = (N - 1 - p) * 4, d = p * 4;
+          rgba180[d] = rgba[s]; rgba180[d + 1] = rgba[s + 1]; rgba180[d + 2] = rgba[s + 2]; rgba180[d + 3] = 255;
+        }
+        const r2 = await embedAndMatch(rgba180, 256);
+        if ((r2.matches[0]?.score ?? 0) > conf) {
+          matches = r2.matches; top = r2.matches[0]; conf = top?.score ?? 0; orient = 180;
+          embMs += r2.embMs; matchMs += r2.matchMs;
+        }
+      }
+      console.log(`[quick] emb=${embMs}ms match=${matchMs}ms aspect=${aspect.toFixed(2)} rot=${orient} → ${top ? `${top.name} ${top.set} (${conf.toFixed(3)})` : 'none'} ${conf >= CONF_MIN ? 'ACCEPT' : 'reject'}`);
+
+      if (conf < CONF_MIN) {
+        const now = Date.now();
+        if (rejectSince.current === 0) rejectSince.current = now;
+        if (now - rejectSince.current >= AI_ESCALATE_MS) {
+          rejectSince.current = 0;
+          showNotif({ type: 'error', text: 'No match', sub: 'realign & retry' });
+          resetScanner(900);
+          return;
+        }
+        resetScanner(250);
+        return;
+      }
+      rejectSince.current = 0;
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      if (quickMode) {
+        await doAdd({ scryfall_id: top.id, card_name: top.name }, false, currentDeck);
+        showNotif({
+          type: currentDeck ? 'success' : 'warn',
+          text: top.name,
+          sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
+          engine: 'embed',
+        });
+        resetScanner(SCAN_COOLDOWN_MS);
+      } else {
+        setResult({
+          scryfall_id: top.id, card_name: top.name, _engine: 'embed',
+          _dist: 0, _gap: 0, _detected: true, _confident: true,
+        });
+        apiFetch('/api/scan/resolve', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scryfall_id: top.id }),
+        }).then(r => r.json()).then(d => {
+          if (d?.card && mounted.current) setResult(prev => (prev ? { ...prev, ...d.card } : prev));
+        }).catch(() => {});
+      }
+    } catch (e) {
+      console.log('[quick-error]', String(e));
+    } finally {
+      liveBusy.value = false;
+    }
+  }, [quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked, onNoCard, springTo, stableCount, liveBusy]);
+
+
   // Review mode: user confirms the card in the sheet
   const onReviewAdd = useCallback(async () => {
     if (!result) return;
@@ -602,7 +1002,93 @@ export default function CameraView({
 
   // ── Force Scan (manual JPEG fallback) ─────────────────────────────────────
 
+  // ON-DEVICE — capture a colour card crop, embed with SigLIP2 ON THE PHONE, and
+  // match against the bundled 115k int8 index. No server, fully offline.
+  const ondeviceScan = useCallback(async () => {
+    if (!cameraRef.current || manualScanning || resolving || result) return;
+    setManualScanning(true);
+    scanBlocked.value = true;
+    try {
+      const photo = await cameraRef.current.takeSnapshot({ quality: 90 });
+      const fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
+      const base64 = await FileSystem.readAsStringAsync(fileUri, { encoding: FileSystem.EncodingType.Base64 });
+      const { warpPhotoColor } = await import('../lib/scanOpenCV');
+      const warp = await warpPhotoColor(base64, 256, 256); // square 256 for the model
+      if (!warp || warp.w === 0) { showNotif({ type: 'error', text: 'Capture failed', sub: 'try again' }); resetScanner(); return; }
+      const { embedAndMatch } = await import('../lib/embedScan');
+      const { matches, embMs, matchMs } = await embedAndMatch(Uint8Array.from(warp.rgba), 256);
+      const top = matches[0];
+      const conf = top?.score ?? 0;
+      console.log(`[ondevice] emb=${embMs}ms match=${matchMs}ms → ${top ? `${top.name} ${top.set}/${top.cn} (${top.score})` : 'none'} ${conf >= CONF_MIN ? 'ACCEPT' : 'reject'}`);
+      if (top && conf >= CONF_MIN) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        showNotif({ type: 'success', text: top.name, sub: `📱 on-device ${top.set?.toUpperCase()} ${top.cn} · ${top.score}`, engine: 'local' });
+      } else if (top) {
+        showNotif({ type: 'warn', text: 'Not sure — realign & retry', sub: `closest: ${top.name} (${top.score})` });
+      } else {
+        showNotif({ type: 'error', text: 'No match', sub: 'try again' });
+      }
+    } catch (e: unknown) {
+      showNotif({ type: 'error', text: 'On-device scan error', sub: (e instanceof Error ? e.message : String(e)).slice(0, 90) });
+    } finally {
+      if (mounted.current) setManualScanning(false);
+      resetScanner(SCAN_COOLDOWN_MS);
+    }
+  }, [manualScanning, resolving, result, showNotif, resetScanner, scanBlocked]);
+
+  // PHASE A — capture a COLOUR card crop and match it against the local SigLIP2
+  // embedding server. Proves embedding accuracy on real captures before we build
+  // the on-device model. (Reuses the Force Scan button; no worklet changes.)
+  const serverScan = useCallback(async () => {
+    if (!cameraRef.current || manualScanning || resolving || result) return;
+    setManualScanning(true);
+    scanBlocked.value = true;
+    try {
+      const photo = await cameraRef.current.takeSnapshot({ quality: 90 });
+      const fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
+      const base64 = await FileSystem.readAsStringAsync(fileUri, { encoding: FileSystem.EncodingType.Base64 });
+      const { warpPhotoColor } = await import('../lib/scanOpenCV');
+      const warp = await warpPhotoColor(base64);
+      if (!warp || warp.w === 0) {
+        showNotif({ type: 'error', text: 'Capture failed', sub: 'try again' });
+        resetScanner(); return;
+      }
+      // warp.detected === false means we fell back to the guide-box centre crop
+      // (full-art card with no clean border) — still worth sending to the matcher.
+      // Encode the RGBA colour crop → JPEG → base64 (jpeg-js needs a global Buffer).
+      const g = global as any;
+      if (typeof g.Buffer === 'undefined') g.Buffer = require('buffer').Buffer;
+      const jpeg = await import('jpeg-js');
+      const enc = (jpeg as any).encode({ data: Uint8Array.from(warp.rgba), width: warp.w, height: warp.h }, 80);
+      const imgB64 = bytesToBase64(enc.data as Uint8Array);
+      const res = await fetch(MATCH_SERVER_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_b64: imgB64 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const top = data?.matches?.[0];
+      const conf = top?.score ?? 0;
+      console.log(`[server] ${data?.ms}ms → ${top ? `${top.name} ${top.set}/${top.cn} (${top.score})` : 'no match'} ${conf >= CONF_MIN ? 'ACCEPT' : 'reject'}`);
+      if (top && conf >= CONF_MIN) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        showNotif({ type: 'success', text: `${top.name}`, sub: `✨ embed ${top.set?.toUpperCase()} ${top.cn} · ${top.score}`, engine: 'smart' });
+      } else if (top) {
+        // Below the confidence gate — likely a loose/poor capture. Fail loud.
+        showNotif({ type: 'warn', text: 'Not sure — realign & retry', sub: `closest: ${top.name} (${top.score})` });
+      } else {
+        showNotif({ type: 'error', text: 'No match', sub: data?.error ? String(data.error).slice(0, 60) : 'server returned nothing' });
+      }
+    } catch (e: unknown) {
+      showNotif({ type: 'error', text: 'Server scan error', sub: (e instanceof Error ? e.message : String(e)).slice(0, 80) });
+    } finally {
+      if (mounted.current) setManualScanning(false);
+      resetScanner(SCAN_COOLDOWN_MS);
+    }
+  }, [manualScanning, resolving, result, showNotif, resetScanner, scanBlocked]);
+
   const onManualCapture = useCallback(async () => {
+    if (ONDEVICE_MATCH) return ondeviceScan();
+    if (SERVER_MATCH) return serverScan();
     if (!cameraRef.current || manualScanning || resolving || result) return;
     setManualScanning(true);
     scanBlocked.value = true;
@@ -687,133 +1173,46 @@ export default function CameraView({
     } finally {
       if (mounted.current) setManualScanning(false);
     }
-  }, [cameraRef, manualScanning, resolving, result, aiScansUsed, quickMode, currentDeck, doAdd, showNotif, handleLocalMatch, resetScanner, scanBlocked]);
+  }, [cameraRef, manualScanning, resolving, result, aiScansUsed, quickMode, currentDeck, doAdd, showNotif, handleLocalMatch, resetScanner, scanBlocked, serverScan, ondeviceScan]);
 
   // ── Frame processor ────────────────────────────────────────────────────────
 
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
-    if (!LIVE_AUTOSCAN || !dbReady.value || scanBlocked.value) return;
+    if (!LIVE_AUTOSCAN || !embedReady.value || scanBlocked.value || liveBusy.value) return;
     frameTick.value += 1;
     if (frameTick.value % FRAME_THROTTLE !== 0) return;
 
+    // Claim the busy-lock NOW, before the expensive resize+marshal, so the next
+    // camera frames skip instead of redundantly marshalling while this one is in
+    // flight. onCornerFrame releases it in its finally; the catch below releases it
+    // if we never reach the dispatch. This is what keeps the detect→detect latency
+    // minimal (tight tracking) without piling up work on the camera thread.
+    liveBusy.value = true;
     try {
-      const fw = frame.width, fh = frame.height;
-      let pw: number, ph: number;
-      if (fw >= fh) { pw = PROC_LONG; ph = Math.round((fh * PROC_LONG) / fw); }
-      else { ph = PROC_LONG; pw = Math.round((fw * PROC_LONG) / fh); }
-
-      // Frame → resized BGR buffer → Mat (native, no snapshot).
-      const rgb = resize(frame, { scale: { width: pw, height: ph }, pixelFormat: 'bgr', dataType: 'uint8' });
-      const src = OpenCV.bufferToMat('uint8', ph, pw, 3, rgb);
-      const gray = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
-      OpenCV.invoke('cvtColor', src, gray, ColorConversionCodes.COLOR_BGR2GRAY);
-      const blur = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
-      OpenCV.invoke('GaussianBlur', gray, blur, OpenCV.createObject(ObjectType.Size, 5, 5), 0);
-      const edges = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
-      OpenCV.invoke('Canny', blur, edges, 30, 90);
+      // ROTATE the sensor frame to upright portrait FIRST, then auto centre-square-
+      // crop + resize to 256×256 RGB. Critical: the back-camera frame is landscape,
+      // so a portrait-held card lies SIDEWAYS and spans wider than the square — a
+      // landscape square-crop clips the card's ends → corner model fits a card-shaped
+      // quad to a fragment → garbage warp → "Blank Card"/"The Bean". Rotating first
+      // makes the card upright (narrower than tall) so it fits the square intact.
+      const rgb = resize(frame, {
+        rotation: '90deg',
+        scale: { width: 256, height: 256 }, // auto centre-square-crop of the upright frame
+        pixelFormat: 'rgb', dataType: 'uint8',
+      });
       if (!fpReported.value) { fpReported.value = true; reportFp(true); }
 
-      const minArea = MIN_AREA_FRAC * pw * ph;
-      let best: Pt[] | null = null;
-      let bestArea = 0;
-      let usedTier = 0;
-
-      // TIER 1 — precise: exact 4-corner trace on raw edges (tight crop, clean cards).
-      const contours = OpenCV.createObject(ObjectType.MatVector);
-      OpenCV.invoke('findContours', edges, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
-      const ci = OpenCV.toJSValue(contours);
-      for (let i = 0; i < ci.array.length; i++) {
-        const c = OpenCV.copyObjectFromVector(contours, i);
-        const area = OpenCV.invoke('contourArea', c, false).value;
-        if (area < minArea) continue;
-        const peri = OpenCV.invoke('arcLength', c, true).value;
-        const approx = OpenCV.createObject(ObjectType.PointVector);
-        OpenCV.invoke('approxPolyDP', c, approx, 0.02 * peri, true);
-        const pj = OpenCV.toJSValue(approx);
-        if (pj.array.length !== 4) continue;
-        const ord = orderQuadPortraitW(pj.array as Pt[]);
-        const w = (hypotW(ord[0], ord[1]) + hypotW(ord[3], ord[2])) / 2;
-        const h = (hypotW(ord[0], ord[3]) + hypotW(ord[1], ord[2])) / 2;
-        const ratio = Math.min(w, h) / Math.max(w, h);
-        if (ratio < ASPECT_LO || ratio > ASPECT_HI) continue;
-        if (area > bestArea) { bestArea = area; best = ord; usedTier = 1; }
-      }
-
-      // TIER 2 — robust: only if precise found nothing. Thicken faint borders, take
-      // the largest card-aspect enclosing rectangle (catches Mystical Archive etc.).
-      if (!best) {
-        const dil = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
-        const kernel = OpenCV.createObject(ObjectType.Mat, 5, 5, DataTypes.CV_8U, new Array(25).fill(1));
-        OpenCV.invoke('dilate', edges, dil, kernel, OpenCV.createObject(ObjectType.Point, -1, -1), 2,
-          BorderTypes.BORDER_CONSTANT, OpenCV.createObject(ObjectType.Scalar, 0));
-        const c2 = OpenCV.createObject(ObjectType.MatVector);
-        OpenCV.invoke('findContours', dil, c2, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
-        const ci2 = OpenCV.toJSValue(c2);
-        let bestRectArea = 0;
-        for (let i = 0; i < ci2.array.length; i++) {
-          const c = OpenCV.copyObjectFromVector(c2, i);
-          const area = OpenCV.invoke('contourArea', c, false).value;
-          if (area < minArea) continue;
-          const rr = OpenCV.invoke('minAreaRect', c);
-          const r = OpenCV.toJSValue(rr) as { centerX: number; centerY: number; width: number; height: number; angle: number };
-          const rw = r.width, rh = r.height;
-          if (rw <= 1 || rh <= 1) continue;
-          const ratio = Math.min(rw, rh) / Math.max(rw, rh);
-          if (ratio < ASPECT_LO || ratio > ASPECT_HI) continue;
-          const rectArea = rw * rh;
-          if (area < 0.6 * rectArea) continue;
-          if (rectArea > bestRectArea) { bestRectArea = rectArea; best = orderQuadPortraitW(rectCornersW(r)); usedTier = 2; }
-        }
-      }
-
-      if (!best) { stableCount.value = 0; OpenCV.clearBuffers(); return; }
-
-      // Require the card to be held roughly still before locking (avoids blur).
-      const cx = (best[0].x + best[1].x + best[2].x + best[3].x) / 4;
-      const cy = (best[0].y + best[1].y + best[2].y + best[3].y) / 4;
-      const moved = Math.abs(cx - lastCx.value) + Math.abs(cy - lastCy.value);
-      lastCx.value = cx; lastCy.value = cy;
-      stableCount.value = moved < pw * 0.05 ? stableCount.value + 1 : 1;
-
-      if (stableCount.value >= STABLE_FRAMES_NEEDED) {
-        const srcPV = OpenCV.createObject(ObjectType.Point2fVector, [
-          OpenCV.createObject(ObjectType.Point2f, best[0].x, best[0].y),
-          OpenCV.createObject(ObjectType.Point2f, best[1].x, best[1].y),
-          OpenCV.createObject(ObjectType.Point2f, best[2].x, best[2].y),
-          OpenCV.createObject(ObjectType.Point2f, best[3].x, best[3].y),
-        ]);
-        const dstPV = OpenCV.createObject(ObjectType.Point2fVector, [
-          OpenCV.createObject(ObjectType.Point2f, 0, 0),
-          OpenCV.createObject(ObjectType.Point2f, WARP_W - 1, 0),
-          OpenCV.createObject(ObjectType.Point2f, WARP_W - 1, WARP_H - 1),
-          OpenCV.createObject(ObjectType.Point2f, 0, WARP_H - 1),
-        ]);
-        const M = OpenCV.invoke('getPerspectiveTransform', srcPV, dstPV, DecompTypes.DECOMP_LU);
-        const warped = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_8U);
-        OpenCV.invoke('warpPerspective', gray, warped, M, OpenCV.createObject(ObjectType.Size, WARP_W, WARP_H),
-          InterpolationFlags.INTER_LINEAR, BorderTypes.BORDER_CONSTANT, OpenCV.createObject(ObjectType.Scalar, 0));
-        const out = OpenCV.matToBuffer(warped, 'uint8');
-        const src = out.buffer;
-        const len = src.length;
-        // Copy into a plain number[] BEFORE clearBuffers frees native memory, and
-        // pass an array (reliably marshalled worklet→JS). Native views / typed
-        // arrays came across as zeros → every scan matched the same card.
-        const arr: number[] = [];
-        for (let i = 0; i < len; i++) arr.push(src[i]);
-        scanBlocked.value = true; // lock until the JS handler resolves + cools down
-        stableCount.value = 0;
-        OpenCV.clearBuffers();
-        onWarpedCard(arr, out.cols, out.rows, usedTier);
-        return;
-      }
-
-      OpenCV.clearBuffers();
+      // Marshal to a plain number[] (typed arrays come across as zeros worklet→JS).
+      // Pass ROTATED dims (width/height swap after 90°) for the box-mapping math.
+      const arr: number[] = [];
+      for (let i = 0; i < rgb.length; i++) arr.push(rgb[i]);
+      onCornerFrame(arr, frame.height, frame.width);
     } catch (e) {
+      liveBusy.value = false; // never dispatched → release so we don't wedge
       if (!fpErrReported.value) { fpErrReported.value = true; onFpError(String(e)); }
-      try { OpenCV.clearBuffers(); } catch (e2) {}
     }
-  }, [dbReady, scanBlocked, frameTick, resize, fpReported, reportFp, fpErrReported, onFpError, onWarpedCard, lastCx, lastCy, stableCount]);
+  }, [embedReady, scanBlocked, liveBusy, frameTick, resize, fpReported, reportFp, fpErrReported, onFpError, onCornerFrame]);
 
   // ── Permission / device guards ─────────────────────────────────────────────
 
@@ -847,7 +1246,15 @@ export default function CameraView({
 
   const dbLoaded = dbFlat != null;
   const busy = resolving || manualScanning;
-  const working = busy || reading || aiThinking; // any active scan state → highlight viewfinder
+
+  // HUD corner colour: white → amber (detected) → green (stable/locked)
+  const hudColor = loadError
+    ? '#ef4444'
+    : (busy || aiThinking) ? '#f59e0b'
+    : (alignState === 2 || reading) ? '#10b981'
+    : alignState === 1 ? '#f59e0b'
+    : dbLoaded ? 'rgba(255,255,255,0.55)'
+    : 'rgba(255,255,255,0.2)';
 
   const NOTIF_C = {
     success: { bg: 'rgba(16,185,129,0.96)',  fg: '#fff' },
@@ -856,7 +1263,13 @@ export default function CameraView({
   } as const;
 
   return (
-    <View style={S.container}>
+    <View
+      style={S.container}
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        if (width > 0 && height > 0) viewSize.current = { w: width, h: height };
+      }}
+    >
       {/* Camera — always active unless we have a review result */}
       <Camera
         ref={cameraRef}
@@ -905,15 +1318,35 @@ export default function CameraView({
         </View>
       )}
 
-      {/* ── Viewfinder ──────────────────────────────────────────────────── */}
+      {/* ── Lock-on tracking box ────────────────────────────────────────── */}
       {!result && (
         <View pointerEvents="none" style={S.vfWrap}>
-          <View style={[
-            S.vfRect,
-            { borderColor: loadError ? '#ef4444' : working ? '#f59e0b' : dbLoaded ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)' },
+          <Animated.View style={[
+            S.trackBox,
+            {
+              borderColor: hudColor,
+              opacity: alignState === 0 ? 0.55 : 1,
+              transform: [
+                { translateX: trackTX },
+                { translateY: trackTY },
+                { rotate: trackRot.interpolate({ inputRange: [-360, 360], outputRange: ['-360deg', '360deg'] }) },
+                { scaleX: trackSX },
+                { scaleY: trackSY },
+              ],
+            },
           ]}>
-            {working && <View style={S.scanLine} />}
-          </View>
+            {/* Corner accents for the lock-on look */}
+            <View style={[S.corner, S.cornerTL, { borderColor: hudColor }]} />
+            <View style={[S.corner, S.cornerTR, { borderColor: hudColor }]} />
+            <View style={[S.corner, S.cornerBR, { borderColor: hudColor }]} />
+            <View style={[S.corner, S.cornerBL, { borderColor: hudColor }]} />
+          </Animated.View>
+        </View>
+      )}
+
+      {/* Hint text — fixed position, does not move with the lock-on box */}
+      {!result && (
+        <View pointerEvents="none" style={S.hintWrap}>
           <Text style={S.vfHint}>
             {loadError ? `⚠️ Load failed: ${loadError}`
               : !dbLoaded ? `⏳ ${loadStage}`
@@ -921,7 +1354,10 @@ export default function CameraView({
               : resolving ? '⚡ Saving…'
               : manualScanning ? '⚡ Reading card…'
               : reading ? '🔍 Reading card… hold steady'
-              : '📷 Hold a card steady in the box — it scans automatically'}
+              : alignState === 2 ? '🎯 Locked on — hold steady'
+              : alignState === 1 ? '🔎 Card detected — hold still'
+              : SERVER_MATCH ? '🃏 Fill the box with the card, then tap Embed scan'
+              : '📷 Point at a card — it locks on automatically'}
           </Text>
         </View>
       )}
@@ -935,7 +1371,8 @@ export default function CameraView({
             }
           </Text>
           <Text style={S.diagHint}>
-            {liveDist != null ? `last match dist=${liveDist} (lower=better, ≤${AUTO_MAX_DIST} adds)` : 'hold a card steady in the box'}
+            {ONDEVICE_MATCH ? embedStatus
+              : liveDist != null ? `last match dist=${liveDist} (lower=better, ≤${AUTO_MAX_DIST} adds)` : 'hold a card steady in the box'}
           </Text>
         </View>
       )}
@@ -967,7 +1404,7 @@ export default function CameraView({
           <Pressable style={[S.forceBtn, busy && S.btnDim]} onPress={onManualCapture} disabled={busy}>
             {manualScanning
               ? <ActivityIndicator color="#0a0e1a" size="small" />
-              : <Text style={S.forceTxt}>⚡ Force scan</Text>}
+              : <Text style={S.forceTxt}>{ONDEVICE_MATCH ? '📱 Embed scan (on-device)' : SERVER_MATCH ? '✨ Embed scan (server)' : '⚡ Force scan'}</Text>}
           </Pressable>
           <Text style={S.aiHint}>{MAX_FREE_AI_SCANS - aiScansUsed} AI scans remaining today</Text>
         </View>
@@ -1086,16 +1523,24 @@ const S = StyleSheet.create({
   dot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#f59e0b' },
   dotReady: { backgroundColor: '#10b981' },
 
-  // Viewfinder
+  // Lock-on tracking box (transformed by Animated translate/scale)
   vfWrap: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
-  vfRect: { width: 232, height: 324, borderWidth: 2, borderRadius: 12, overflow: 'hidden' },
-  scanLine: {
-    position: 'absolute', left: 0, right: 0, height: 2, top: '40%',
-    backgroundColor: 'rgba(245,158,11,0.7)',
+  trackBox: { width: 232, height: 324, borderRadius: 14, borderWidth: 2 },
+  // Corner accent pieces — colour applied inline
+  corner: { position: 'absolute', width: 26, height: 26, borderWidth: 3 },
+  cornerTL: { top: -2, left: -2, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 10 },
+  cornerTR: { top: -2, right: -2, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 10 },
+  cornerBR: { bottom: -2, right: -2, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 10 },
+  cornerBL: { bottom: -2, left: -2, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 10 },
+  // Hint text sits fixed below centre (does not track the card)
+  hintWrap: {
+    position: 'absolute', left: 0, right: 0, top: SCREEN_H * 0.5 + 180,
+    alignItems: 'center',
   },
   vfHint: {
-    color: 'rgba(255,255,255,0.88)', marginTop: 18, fontSize: 13,
-    textAlign: 'center', paddingHorizontal: 20,
+    color: 'rgba(255,255,255,0.9)', fontSize: 13, textAlign: 'center',
+    paddingHorizontal: 20, backgroundColor: 'rgba(0,0,0,0.45)',
+    paddingVertical: 6, borderRadius: 10, overflow: 'hidden',
   },
 
   // Diagnostics strip (top, below the top bar)
