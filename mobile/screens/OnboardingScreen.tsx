@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import { updateProfile } from '../lib/db';
 import { useTheme } from '../lib/theme';
-import { AVATAR_OPTIONS } from './HomeScreen';
+import { AVATAR_OPTIONS } from '../lib/avatars';
 
 type Step = 'username' | 'avatar';
 

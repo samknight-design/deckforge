@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { getProfile, getLibraryStats, getDecks, updateProfile, type Profile } from '../lib/db';
 import { useTheme, xpToLevel, BRACKET_COLORS } from '../lib/theme';
-import { AVATAR_OPTIONS } from './HomeScreen';
+import { AVATAR_OPTIONS } from '../lib/avatars';
 import RewardsTrack from '../components/RewardsTrack';
 
 const LEVEL_TITLES: Record<number, string> = {

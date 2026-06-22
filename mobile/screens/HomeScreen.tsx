@@ -14,27 +14,12 @@ import { useTheme, xpToLevel, BRACKET_COLORS, BRACKET_NAMES } from '../lib/theme
 import DailyChallengesWidget from '../components/DailyChallengesWidget';
 import { tryCompleteChallenge } from '../lib/challenges';
 import { useXpToast } from '../lib/xpToast';
+import { AVATAR_OPTIONS } from '../lib/avatars';
 
 // Static news items — swap for a Supabase `news_items` table query later
 const NEWS = [
   { id: '1', title: 'AI Insights upgraded', body: 'Bracket estimates are now more accurate with the new Claude model.', date: 'Jun 2026' },
   { id: '2', title: 'Community decks live', body: 'Share your decks and discover builds from other players.', date: 'Jun 2026' },
-];
-
-// Avatar placeholder map (emoji by key — replaced with real SVGs in future)
-export const AVATAR_OPTIONS = [
-  { key: 'wizard',   emoji: '🧙' },
-  { key: 'dragon',   emoji: '🐉' },
-  { key: 'knight',   emoji: '⚔️' },
-  { key: 'mystic',   emoji: '🔮' },
-  { key: 'eagle',    emoji: '🦅' },
-  { key: 'moon',     emoji: '🌙' },
-  { key: 'comet',    emoji: '☄️' },
-  { key: 'castle',   emoji: '🏰' },
-  { key: 'wave',     emoji: '🌊' },
-  { key: 'storm',    emoji: '⚡' },
-  { key: 'flame',    emoji: '🔥' },
-  { key: 'forest',   emoji: '🌿' },
 ];
 
 function getAvatar(key?: string | null, initial = 'U') {
