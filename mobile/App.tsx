@@ -34,7 +34,7 @@ WebBrowser.maybeCompleteAuthSession();
 
 // ── Navigation types ─────────────────────────────────────────────────────────
 
-type Tab = 'home' | 'library' | 'decks' | 'profile';
+type Tab = 'home' | 'decks' | 'profile';
 
 type Screen =
   | { id: 'home' }
@@ -47,18 +47,16 @@ type Screen =
   | { id: 'profile' }
   | { id: 'settings' };
 
-const TAB_ORDER: Tab[] = ['home', 'library', 'decks', 'profile'];
+const TAB_ORDER: Tab[] = ['home', 'decks', 'profile'];
 
 const TAB_ICONS: Record<Tab, string> = {
   home: '🏠',
-  library: '📚',
   decks: '🗂️',
   profile: '👤',
 };
 
 const TAB_LABELS: Record<Tab, string> = {
   home: 'Home',
-  library: 'Library',
   decks: 'Decks',
   profile: 'Profile',
 };
@@ -109,7 +107,7 @@ function TabBar({
         </Animated.View>
       </View>
 
-      {/* Right two tabs */}
+      {/* Right tabs */}
       {TAB_ORDER.slice(2).map((t) => (
         <Pressable key={t} style={tabStyles.tab} onPress={() => onTab(t)}>
           <Text style={tabStyles.tabIcon}>{TAB_ICONS[t]}</Text>
@@ -119,6 +117,9 @@ function TabBar({
           {t === active && <View style={[tabStyles.activeDot, { backgroundColor: colors.accent }]} />}
         </Pressable>
       ))}
+      {/* Reserved slot (keeps the right side balanced against the two left tabs).
+          The future "Play MTG" tab (RN6) drops in here. */}
+      {TAB_ORDER.slice(2).length < 2 && <View style={tabStyles.tab} />}
     </View>
   );
 }
@@ -219,6 +220,16 @@ function AuthedApp({ session }: { session: Session }) {
     );
   }
 
+  if (screen.id === 'library') {
+    return (
+      <LibraryScreen
+        userId={userId}
+        onBack={goBack}
+        onGoToScan={() => goScan()}
+      />
+    );
+  }
+
   if (screen.id === 'settings') {
     return <SettingsScreen onBack={() => setScreen({ id: 'profile' })} userId={userId} />;
   }
@@ -252,19 +263,17 @@ function AuthedApp({ session }: { session: Session }) {
           <HomeScreen
             userId={userId}
             onOpenDeck={(deck) => setScreen({ id: 'deckDetail', deck: deck as unknown as Deck })}
-            onGoToLibrary={() => goTab('library')}
+            onGoToLibrary={() => setScreen({ id: 'library' })}
             onGoToScan={() => goScan()}
             onGoToDeckSearch={() => setScreen({ id: 'deckSearch' })}
           />
-        )}
-        {screen.id === 'library' && (
-          <LibraryScreen userId={userId} onGoToScan={() => goScan()} />
         )}
         {screen.id === 'decks' && (
           <DecksScreen
             userId={userId}
             onBack={goHome}
             onOpenDeck={(deck) => setScreen({ id: 'deckDetail', deck })}
+            onGoToLibrary={() => setScreen({ id: 'library' })}
           />
         )}
         {screen.id === 'deckDetail' && (

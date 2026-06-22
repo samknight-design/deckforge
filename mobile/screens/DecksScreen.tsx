@@ -22,10 +22,12 @@ export default function DecksScreen({
   userId,
   onBack,
   onOpenDeck,
+  onGoToLibrary,
 }: {
   userId: string;
   onBack: () => void;
   onOpenDeck: (deck: Deck) => void;
+  onGoToLibrary: () => void;
 }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -163,7 +165,7 @@ export default function DecksScreen({
         </Pressable>
       </View>
 
-      {/* View mode toggle */}
+      {/* View mode toggle + full card library shortcut */}
       <View style={styles.viewToggle}>
         {(['list', 'compact', 'tiled'] as ViewMode[]).map((m) => (
           <Pressable
@@ -176,6 +178,9 @@ export default function DecksScreen({
             </Text>
           </Pressable>
         ))}
+        <Pressable style={styles.libraryBtn} onPress={onGoToLibrary}>
+          <Text style={styles.libraryBtnText}>📚 Library</Text>
+        </Pressable>
       </View>
 
       {decks === null ? (
@@ -244,6 +249,12 @@ const createStyles = (c: ReturnType<typeof import('../lib/theme').useTheme>['col
     },
     viewBtnActive: { borderColor: c.accent, backgroundColor: 'rgba(245,158,11,0.1)' },
     viewBtnText: { color: c.textMuted, fontSize: 12, fontWeight: '600' },
+    libraryBtn: {
+      marginLeft: 'auto',
+      paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999,
+      backgroundColor: c.surfaceAlt, borderColor: c.border, borderWidth: 1,
+    },
+    libraryBtnText: { color: c.text, fontSize: 12, fontWeight: '600' },
     center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
     emptyEmoji: { fontSize: 48, marginBottom: 12 },
     emptyTitle: { color: c.text, fontSize: 18, fontWeight: '700', marginBottom: 6 },

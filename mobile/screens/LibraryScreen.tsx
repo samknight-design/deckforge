@@ -25,9 +25,11 @@ const TYPE_LABELS: TypeFilter[] = ['Creature', 'Instant', 'Sorcery', 'Enchantmen
 
 export default function LibraryScreen({
   userId,
+  onBack,
   onGoToScan,
 }: {
   userId: string;
+  onBack: () => void;
   onGoToScan: () => void;
 }) {
   const { colors, formatPrice } = useTheme();
@@ -183,7 +185,12 @@ export default function LibraryScreen({
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.title}>My Library</Text>
+        <View style={styles.headerLeft}>
+          <Pressable style={styles.backBtn} onPress={onBack} hitSlop={8}>
+            <Text style={styles.backBtnText}>←</Text>
+          </Pressable>
+          <Text style={styles.title}>My Library</Text>
+        </View>
         <Pressable style={styles.scanBtn} onPress={onGoToScan}>
           <Text style={styles.scanBtnText}>+ Scan</Text>
         </Pressable>
@@ -314,6 +321,13 @@ const createStyles = (c: ReturnType<typeof import('../lib/theme').useTheme>['col
       paddingHorizontal: 20, paddingTop: 60, paddingBottom: 12,
       borderBottomColor: c.border, borderBottomWidth: 1,
     },
+    headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    backBtn: {
+      width: 36, height: 36, borderRadius: 18,
+      backgroundColor: c.surface, borderColor: c.border, borderWidth: 1,
+      alignItems: 'center', justifyContent: 'center',
+    },
+    backBtnText: { color: c.text, fontSize: 18, fontWeight: '700' },
     title: { color: c.text, fontSize: 22, fontWeight: '700' },
     scanBtn: { backgroundColor: c.accent, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
     scanBtnText: { color: c.accentText, fontWeight: '700', fontSize: 13 },

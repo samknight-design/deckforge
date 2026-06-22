@@ -164,14 +164,16 @@ Phase RN4. Web will pick up the change automatically via the shim.
 - **Build mode matters**: `mobile/` cannot run in stock Expo Go once
   vision-camera or any other native module is in use. Use `npx expo start
   --dev-client` after the user installs the EAS-built dev client APK.
-- **Vision-camera Expo plugin currently disabled** in `mobile/app.json` —
-  the v5 plugin entry made `npx expo config` exit non-zero with a silent
-  PowerShell stderr swallow. Restore it later if we need its prebuild-side
-  permission strings; the runtime camera permission flow works without it.
-- **Camera permission text** — currently the system default. To customise,
-  re-add the vision-camera plugin once we figure out the SDK 54 mismatch,
-  OR set `ios.infoPlist.NSCameraUsageDescription` and
-  `android.permissions` directly in `app.json`.
+- **Vision-camera Expo plugin is enabled** in `mobile/app.json` (with
+  `enableFrameProcessors: true`), alongside `react-native-fast-tflite` and
+  `expo-build-properties`. The earlier SDK-54 `npx expo config` failure was
+  resolved; the plugin now drives the prebuild-side camera permission strings
+  and its frame processors are what power the on-device scanner (and any
+  future QR scanning).
+- **Camera permission text** is customised, not the system default: the
+  plugin's `cameraPermissionText`, plus an explicit
+  `ios.infoPlist.NSCameraUsageDescription` and
+  `android.permissions: ["android.permission.CAMERA"]` in `app.json`.
 - **Workspace symlinks**: `npm install` at root sets up
   `node_modules/@deckforge/{shared,mobile}` as symlinks. Web and mobile
   use different React versions (18 / 19); React 18 is pinned in the root
