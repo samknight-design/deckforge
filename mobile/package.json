@@ -33,6 +33,7 @@
     "react": "19.1.0",
     "react-native": "0.81.5",
     "react-native-fast-opencv": "^0.4.8",
+    "react-native-fast-tflite": "^2.0.0",
     "react-native-url-polyfill": "^3.0.0",
     "react-native-vision-camera": "^4.7.3",
     "react-native-worklets-core": "^1.6.3",

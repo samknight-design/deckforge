@@ -34,6 +34,12 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# session debug artifacts (scanner work — do not commit)
+crash_capture.log
+phone_screen.png
+mobile/build.log
+mobile/metro.log
+
 # local env files
 .env
 .env.local

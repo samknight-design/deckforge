@@ -39,6 +39,7 @@
           "enableFrameProcessors": true
         }
       ],
+      "react-native-fast-tflite",
       [
         "expo-build-properties",
         {

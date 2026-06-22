@@ -12,7 +12,7 @@
 // rebuild needed). The worklet catches the error safely until then; use
 // Force Scan as the fallback in that case.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -30,8 +30,10 @@ import {
   useCameraFormat,
   useCameraPermission,
   useFrameProcessor,
+  runAtTargetFps,
 } from 'react-native-vision-camera';
 import { useSharedValue, useRunOnJS } from 'react-native-worklets-core';
+import { useTensorflowModel } from 'react-native-fast-tflite';
 import { useResizePlugin } from 'vision-camera-resize-plugin';
 import {
   OpenCV,
@@ -59,7 +61,19 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'fluid-v4';
+const BUILD_TAG = 'tflite-v2';
+
+// Camera-thread detector: run the corner model as TFLite via react-native-fast-tflite
+// INSIDE the frame-processor worklet (runSync). This removes the per-frame 196k-pixel
+// worklet→JS marshal that throttled the JS-thread ONNX detector — the box now tracks at
+// camera framerate. The heavy warp+embed still runs once per lock on the JS thread; the
+// worklet hands it the frame pixels exactly once (captureNext). Flip to false to fall
+// back to the proven JS-thread ONNX detector (onCornerFrame) if the worklet misbehaves.
+const USE_TFLITE_DETECTOR = true;
+const TFLITE_URL = 'file:///storage/emulated/0/Android/data/app.deckforge/files/corner.tflite';
+const TFLITE_FPS = 12; // STABLE value (24 froze: camera-thread starvation). Next: decouple
+                       // visual box from detection rate (interpolate) instead of raising this.
+const MISS_BEFORE_RESET = 5; // hold the box through detection gaps shorter than this (anti-jump)
 
 // Continuous auto-scan: native OpenCV detects + flattens the card every (throttled)
 // frame on the camera thread; the heavy 114k match runs once on the JS thread only
@@ -102,6 +116,14 @@ const MATCH_SERVER_URL = 'http://localhost:8765/match';
 // crop is rejected ("realign & retry") instead of being force-matched. This is the
 // rejection ManaBox does — it only commits when it's actually confident.
 const CONF_MIN = 0.82;
+// Reprints share art → a real card's top-K embed matches are the SAME NAME (different
+// printings); garbage matches random different names. So accept a sub-CONF_MIN match when
+// the top-K reach name CONSENSUS ("treat same-name ties as confident"). Live warps of hard
+// cards (splits, showcase) sit ~0.72-0.79 and were being wrongly rejected at 0.82.
+const NAME_CONSENSUS_MIN = 0.72; // floor below which even same-name consensus isn't trusted
+                                 // (0.68 let an angle-distorted warp false-accept at 0.695)
+const TEMPORAL_MIN = 0.74;    // min score to count toward temporal (cross-attempt) consensus
+const TEMPORAL_FRAMES = 2;    // same card N consecutive attempts → accept (rescues borderline 1-printing cards)
 
 // dist ≤ this counts as a confident match. gap is NOT used — reprints share
 // artwork, so the runner-up is often another printing of the SAME card (gap≈0).
@@ -356,6 +378,20 @@ export default function CameraView({
   const [liveGap, setLiveGap]   = useState<number | null>(null);
   // 0 = no card, 1 = card detected (unsteady), 2 = stable/locked
   const [alignState, setAlignState] = useState<0 | 1 | 2>(0);
+
+  // ── Collect-mode (training-data capture) ───────────────────────────────────
+  // Pure-JS capture path for the real-data detector pipeline: when ON, the scanner
+  // stops recognising and instead snapshots the exact 256×256 frame the corner
+  // detector sees + its predicted corners (256-space, so they overlay the saved
+  // JPEG 1:1). Build real holder/multi-card data on your own collection → fine-tune
+  // the detector. No native rebuild needed — toggled live on the phone.
+  const [collectMode, setCollectMode]   = useState(false);
+  const collectModeRef                  = useRef(false); // read on the camera-thread callback (no stale closure)
+  const [collectCount, setCollectCount] = useState(0);
+  const collectCountRef                 = useRef(0);
+  const collectSaving                   = useRef(false); // guard double-save on rapid taps
+  const lastFrameRgb = useRef<Uint8Array | null>(null);  // latest 256² RGB the detector saw
+  const lastCorners  = useRef<number[][] | null>(null);  // its predicted corners (256-space) or null
   const [popcountTable]       = useState<number[]>(() => {
     const t = new Array(256); t[0] = 0;
     for (let i = 1; i < 256; i++) t[i] = (i & 1) + t[i >> 1];
@@ -377,6 +413,30 @@ export default function CameraView({
   const lastCy           = useSharedValue(0);
   const stableCount      = useSharedValue(0);      // consecutive steady detections
   const alignSV          = useSharedValue(0);      // mirrors alignState in the worklet (avoids per-frame JS calls)
+  const captureNext      = useSharedValue(false);  // JS → worklet: deliver ONE frame's pixels (lock → warp+embed)
+  const collectGrab      = useSharedValue(false);  // collect-mode shutter → worklet: deliver one frame to save
+  const tfReady          = useSharedValue(false);  // TFLite corner model loaded (worklet gate)
+
+  // TFLite corner detector — loaded once from the device files dir. The source MUST be a
+  // stable ref: a fresh { url } literal each render made the hook reload the model on EVERY
+  // render (the scanner re-renders constantly) → hundreds of model loads → OOM crash + the
+  // "failed to load Tensorflow Model" ×200 spam. useMemo loads it exactly once.
+  const tfSource = useMemo(() => ({ url: TFLITE_URL }), []);
+  const tflite  = useTensorflowModel(tfSource); // fast-tflite 2.x: default CPU delegate
+  // Only expose the model object when the TFLite detector is actually active. Otherwise
+  // the Nitro HybridObject leaks into the vision-camera worklet closure and throws
+  // ("no NativeState") because worklets-core can't share it. ONNX mode → null.
+  const tfModel = (USE_TFLITE_DETECTOR && tflite.state === 'loaded') ? tflite.model : null;
+  useEffect(() => {
+    tfReady.value = tfModel != null;
+    console.log('[detector]', USE_TFLITE_DETECTOR ? 'TFLITE' : 'ONNX', '·', BUILD_TAG, '· tflite:', tflite.state);
+    if (tflite.state === 'error') {
+      console.warn('[tflite] load error', tflite.error);
+      if (USE_TFLITE_DETECTOR) setEmbedStatus(`tflite load failed: ${String(tflite.error).slice(0, 60)}`);
+    } else if (tflite.state === 'loaded') {
+      console.log('[tflite] corner model loaded ✓');
+    }
+  }, [tflite, tfModel, tfReady]);
 
   // Called from the worklet (once) to report whether raw-pixel access works.
   const reportFp = useRunOnJS((ok: boolean) => {
@@ -392,6 +452,9 @@ export default function CameraView({
   const trackRot = useRef(new Animated.Value(0)).current; // rotation (deg) to match card tilt
   const lastAlign = useRef(0);
   const lastRot = useRef(0);
+  const missCount = useRef(0); // consecutive no-card frames (hysteresis so a brief gap doesn't snap the box)
+  const lastTopId = useRef('');   // top-match id across attempts (temporal consensus)
+  const lastTopCount = useRef(0);
   // Actual rendered preview size (measured) — the camera draws edge-to-edge, which
   // is LARGER than Dimensions.get('window') (that excludes the status bar). Using
   // the real size is what makes the overlay land exactly on the card.
@@ -456,10 +519,24 @@ export default function CameraView({
   // Called from the worklet when no card is in view → box glides back to centre.
   const onNoCard = useRunOnJS(() => {
     if (!mounted.current) return;
+    missCount.current += 1;
+    if (missCount.current < MISS_BEFORE_RESET) return; // hold the box through a brief detection gap
     lastRot.current = 0;
     springTo(0, 0, 1, 1, 0);
     if (lastAlign.current !== 0) { lastAlign.current = 0; setAlignState(0); }
   }, [springTo]);
+
+  // Swallow the recoverable Samsung session-config error ('Broken pipe' on stream config
+  // when isActive/frameProcessor toggle) so it doesn't spam the dev error overlay. The
+  // camera recovers and streams fine; surface only genuinely unexpected errors.
+  const onCameraError = useCallback((e: { code?: string; message?: string }) => {
+    const code = e?.code ?? '';
+    if (code === 'session/invalid-output-configuration' || /Broken pipe/i.test(String(e?.message))) {
+      console.log('[camera] recoverable session config error (ignored)');
+      return;
+    }
+    console.warn('[camera] error:', code, e?.message);
+  }, []);
 
   // Called from the worklet (throttled) with the live best distance/gap.
   const reportMatch = useRunOnJS((dist: number, gap: number) => {
@@ -806,6 +883,17 @@ export default function CameraView({
       const rgb = Uint8Array.from(rgbArr);
       const { detectCorners } = await import('../lib/embedScan');
       const corners = await detectCorners(rgb, 256, 3); // [tl,tr,br,bl] in 256 space
+      // Collect-mode: stash the detector's exact 256² input + its predicted corners
+      // for the shutter to write as training data. We deliberately also keep frames
+      // the detector MISSES (corners null) — sleeved/toploader/multi-card failures
+      // are the data we most need. No recognition / add-to-deck while collecting.
+      if (collectModeRef.current) {
+        // Stash for the shutter, then fall through to drive the live box so the user
+        // sees the detector's guess while framing — including loose/wrong boxes on
+        // clutter, exactly the cases to capture. Warp/embed/add is skipped below.
+        lastFrameRgb.current = rgb;
+        lastCorners.current = corners ?? null;
+      }
       if (!corners) { emaValid.current = false; onNoCard(); return; }
 
       // Map 256-square model coords → upright-portrait-frame coords. The worklet
@@ -831,6 +919,7 @@ export default function CameraView({
         onNoCard();
         return;
       }
+      missCount.current = 0; // valid card → clear the no-card hysteresis
 
       // Drive the lock-on box. The frame is already upright portrait, so map to the
       // portrait screen with a single COVER-scale + centre-crop (no rotation).
@@ -876,6 +965,10 @@ export default function CameraView({
       if (fState !== lastAlign.current) { lastAlign.current = fState; setAlignState(fState as 0 | 1 | 2); }
 
       if (stableCount.value < STABLE_FRAMES_NEEDED) return;
+
+      // Collect-mode: the box tracks for framing feedback, but never recognise or
+      // auto-add — keep re-evaluating so the shutter can grab any frame on demand.
+      if (collectModeRef.current) { stableCount.value = 0; return; }
 
       // Locked + steady → warp the card flat and embed.
       scanBlocked.value = true;
@@ -977,6 +1070,267 @@ export default function CameraView({
       liveBusy.value = false;
     }
   }, [quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked, onNoCard, springTo, stableCount, liveBusy]);
+
+  // ── TFLite camera-thread path ───────────────────────────────────────────────
+  // Write one stashed frame (lastFrameRgb) + its corners to documentDirectory/collect/.
+  // Shared by the ONNX collect path (captureCollect) and the TFLite grab (onGrabbedFrame).
+  const saveCollectFrame = useCallback(async () => {
+    if (collectSaving.current) return;
+    const rgb = lastFrameRgb.current;
+    if (!rgb) { showNotif({ type: 'warn', text: 'No frame yet', sub: 'point at a card first' }); return; }
+    collectSaving.current = true;
+    try {
+      const g: any = global as any;
+      if (typeof g.Buffer === 'undefined') g.Buffer = require('buffer').Buffer;
+      const jpeg = await import('jpeg-js');
+      const N = 256 * 256;
+      const rgba = new Uint8Array(N * 4);
+      for (let p = 0; p < N; p++) {
+        rgba[p * 4] = rgb[p * 3]; rgba[p * 4 + 1] = rgb[p * 3 + 1];
+        rgba[p * 4 + 2] = rgb[p * 3 + 2]; rgba[p * 4 + 3] = 255;
+      }
+      const enc = (jpeg as any).encode({ data: rgba, width: 256, height: 256 }, 92);
+      const base = `${FileSystem.documentDirectory}collect/`;
+      await FileSystem.makeDirectoryAsync(base, { intermediates: true }).catch(() => {});
+      const ts = Date.now();
+      await FileSystem.writeAsStringAsync(`${base}f_${ts}.jpg`,
+        bytesToBase64(enc.data as Uint8Array), { encoding: FileSystem.EncodingType.Base64 });
+      await FileSystem.writeAsStringAsync(`${base}f_${ts}.json`,
+        JSON.stringify({ ts, build: BUILD_TAG, size: 256, corners: lastCorners.current }));
+      collectCountRef.current += 1;
+      setCollectCount(collectCountRef.current);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+      showNotif({
+        type: 'success',
+        text: `Captured #${collectCountRef.current}`,
+        sub: lastCorners.current ? 'frame + corners saved' : '⚠ detector missed — frame saved',
+      });
+    } catch (e) {
+      showNotif({ type: 'error', text: 'Capture failed', sub: String(e).slice(0, 40) });
+    } finally {
+      collectSaving.current = false;
+    }
+  }, [showNotif]);
+
+  // Cheap per-frame hop from the TFLite worklet: just the 8 corner numbers (256-space)
+  // + mean heatmap peak. Drives the lock-on box + stability EXACTLY like onCornerFrame,
+  // but with NO pixel marshal. On lock it raises captureNext so the worklet hands over
+  // one frame's pixels (→ onGrabbedFrame) for the warp+embed.
+  const onCornerResult = useRunOnJS((cs: number[], peakAvg: number, fw: number, fh: number) => {
+    if (!mounted.current || scanBlocked.value) { liveBusy.value = false; return; }
+    try {
+      if (captureNext.value) return;                       // already waiting for the grab
+      const corners: number[][] = [[cs[0], cs[1]], [cs[2], cs[3]], [cs[4], cs[5]], [cs[6], cs[7]]];
+      if (collectModeRef.current) lastCorners.current = peakAvg >= 0.20 ? corners : null;
+      if (peakAvg < 0.20) { emaValid.current = false; onNoCard(); return; }
+
+      const sq = Math.min(fw, fh);
+      const cropX = (fw - sq) / 2, cropY = (fh - sq) / 2;
+      const fpt = corners.map(([mx, my]) => ({ x: cropX + (mx / 256) * sq, y: cropY + (my / 256) * sq }));
+      const dd = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
+      const qw = (dd(fpt[0], fpt[1]) + dd(fpt[3], fpt[2])) / 2;
+      const qh = (dd(fpt[0], fpt[3]) + dd(fpt[1], fpt[2])) / 2;
+      const aspect = Math.min(qw, qh) / Math.max(qw, qh);
+      const areaFrac = (qw * qh) / (sq * sq);
+      if (aspect < 0.5 || aspect > 0.88 || areaFrac < 0.12 || areaFrac > 1.25) {
+        stableCount.value = 0; emaValid.current = false; onNoCard(); return;
+      }
+      missCount.current = 0; // valid card → clear the no-card hysteresis
+
+      const VW = viewSize.current.w, VH = viewSize.current.h;
+      const mscale = Math.max(VW / fw, VH / fh);
+      const mp = (p: { x: number; y: number }) => ({
+        x: p.x * mscale - (fw * mscale - VW) / 2,
+        y: p.y * mscale - (fh * mscale - VH) / 2,
+      });
+      const A = 0.5;
+      if (!emaValid.current || emaPts.current.length !== 4) {
+        emaPts.current = fpt.map((p) => ({ x: p.x, y: p.y }));
+        emaValid.current = true;
+      } else {
+        for (let i = 0; i < 4; i++) {
+          emaPts.current[i].x += A * (fpt[i].x - emaPts.current[i].x);
+          emaPts.current[i].y += A * (fpt[i].y - emaPts.current[i].y);
+        }
+      }
+      const spt = emaPts.current;
+      const p0 = mp(spt[0]), p1 = mp(spt[1]), p2 = mp(spt[2]), p3 = mp(spt[3]);
+      const cx = (p0.x + p1.x + p2.x + p3.x) / 4, cy = (p0.y + p1.y + p2.y + p3.y) / 4;
+      const sw = (dd(p0, p1) + dd(p2, p3)) / 2, sh = (dd(p1, p2) + dd(p3, p0)) / 2;
+      let ang = (Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180) / Math.PI;
+      while (ang - lastRot.current > 90) ang -= 180;
+      while (ang - lastRot.current < -90) ang += 180;
+      lastRot.current = ang;
+
+      const qcx = (fpt[0].x + fpt[1].x + fpt[2].x + fpt[3].x) / 4;
+      const qcy = (fpt[0].y + fpt[1].y + fpt[2].y + fpt[3].y) / 4;
+      const moved = Math.abs(qcx - lastQuadCx.current) + Math.abs(qcy - lastQuadCy.current);
+      lastQuadCx.current = qcx; lastQuadCy.current = qcy;
+      stableCount.value = moved < sq * 0.04 ? stableCount.value + 1 : 1;
+      const fState = stableCount.value >= STABLE_FRAMES_NEEDED ? 2 : 1;
+      springTo(
+        cx - viewSize.current.w / 2, cy - viewSize.current.h / 2,
+        Math.max(0.2, Math.min(2.4, sw / BOX_W)), Math.max(0.2, Math.min(2.4, sh / BOX_H)), ang,
+      );
+      if (fState !== lastAlign.current) { lastAlign.current = fState; setAlignState(fState as 0 | 1 | 2); }
+
+      if (collectModeRef.current) return;                  // collect: box only, shutter grabs
+      if (stableCount.value < STABLE_FRAMES_NEEDED) return;
+      if (!embedReady.value) return;                       // don't lock until SigLIP/matcher loaded (no "not initialised")
+      captureNext.value = true;                            // locked → worklet delivers pixels next tick
+    } finally {
+      liveBusy.value = false;
+    }
+  }, [scanBlocked, captureNext, onNoCard, springTo, stableCount, liveBusy]);
+
+  // One-shot heavy path: the worklet marshals the frame's pixels exactly once (on lock,
+  // or on a collect shutter). Warp → embed → match → add — same as onCornerFrame's tail.
+  const onGrabbedFrame = useRunOnJS(async (rgbArr: number[], cs: number[], peakAvg: number, fw: number, fh: number, forCollect: boolean) => {
+    try {
+      const rgb = Uint8Array.from(rgbArr);
+      const corners: number[][] = [[cs[0], cs[1]], [cs[2], cs[3]], [cs[4], cs[5]], [cs[6], cs[7]]];
+      if (forCollect) {
+        lastFrameRgb.current = rgb;
+        lastCorners.current = peakAvg >= 0.20 ? corners : null;
+        await saveCollectFrame();
+        return;
+      }
+      scanBlocked.value = true;
+      stableCount.value = 0;
+      setReading(true);
+      if (readingTimer.current) clearTimeout(readingTimer.current);
+      readingTimer.current = setTimeout(() => { if (mounted.current) setReading(false); }, 900);
+
+      const { warpQuadColor } = await import('../lib/scanOpenCV');
+      const rgba = warpQuadColor(rgb, 256, 3, corners, 256);
+      const { embedAndMatch } = await import('../lib/embedScan');
+      // Accept on absolute confidence OR same-name consensus in the top-K (reprints).
+      const ok = (ms: Array<{ name: string; score: number }>): boolean => {
+        const t = ms[0];
+        if (!t) return false;
+        if (t.score >= CONF_MIN) return true;                   // single high-confidence hit
+        if (t.score < NAME_CONSENSUS_MIN) return false;         // too low to trust at all
+        return ms.filter((m) => m.name === t.name).length >= 3; // strong same-name consensus (≥3 of top-K)
+      };
+
+      let { matches, embMs, matchMs } = await embedAndMatch(rgba, 256);
+      let orient = 0;
+      // Only pay for the 180° retry if the upright pass didn't already accept (handles
+      // physically-rotated cards). Accepting on consensus here also skips the retry for
+      // hard cards → ~halves their time.
+      if (!ok(matches)) {
+        const N = 256 * 256;
+        const rgba180 = new Uint8Array(rgba.length);
+        for (let p = 0; p < N; p++) {
+          const s = (N - 1 - p) * 4, d = p * 4;
+          rgba180[d] = rgba[s]; rgba180[d + 1] = rgba[s + 1]; rgba180[d + 2] = rgba[s + 2]; rgba180[d + 3] = 255;
+        }
+        const r2 = await embedAndMatch(rgba180, 256);
+        if (ok(r2.matches) || (r2.matches[0]?.score ?? 0) > (matches[0]?.score ?? 0)) {
+          matches = r2.matches; orient = 180;
+          embMs += r2.embMs; matchMs += r2.matchMs;
+        }
+      }
+      const top = matches[0];
+      const conf = top?.score ?? 0;
+      let accepted = ok(matches);
+      const sameN = top ? matches.filter((m) => m.name === top.name).length : 0;
+      // Temporal consensus: the SAME card as top match across consecutive attempts → accept
+      // even when each pass is sub-threshold (rescues borderline single-printing cards like
+      // Mindful Biomancer flickering ~0.80). Angle/garbage mismatches vary between attempts,
+      // so they never accumulate temporal consensus.
+      let temporalN = 0;
+      if (top && top.score >= TEMPORAL_MIN) {
+        if (top.id === lastTopId.current) lastTopCount.current += 1;
+        else { lastTopId.current = top.id; lastTopCount.current = 1; }
+        temporalN = lastTopCount.current;
+        if (!accepted && temporalN >= TEMPORAL_FRAMES) accepted = true;
+      } else {
+        lastTopId.current = ''; lastTopCount.current = 0;
+      }
+      console.log(`[quick-tf] emb=${embMs}ms match=${matchMs}ms peak=${peakAvg.toFixed(2)} rot=${orient} → ${top ? `${top.name} ${top.set} (${conf.toFixed(3)} ${sameN}/${matches.length} t${temporalN})` : 'none'} ${accepted ? 'ACCEPT' : 'reject'}`);
+
+      if (!accepted) {
+        const now = Date.now();
+        if (rejectSince.current === 0) rejectSince.current = now;
+        if (now - rejectSince.current >= AI_ESCALATE_MS) {
+          rejectSince.current = 0;
+          showNotif({ type: 'error', text: 'No match', sub: 'realign & retry' });
+          resetScanner(900);
+          return;
+        }
+        resetScanner(250);
+        return;
+      }
+      rejectSince.current = 0;
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      if (quickMode) {
+        await doAdd({ scryfall_id: top.id, card_name: top.name }, false, currentDeck);
+        showNotif({
+          type: currentDeck ? 'success' : 'warn',
+          text: top.name,
+          sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
+          engine: 'embed',
+        });
+        resetScanner(SCAN_COOLDOWN_MS);
+      } else {
+        setResult({
+          scryfall_id: top.id, card_name: top.name, _engine: 'embed',
+          _dist: 0, _gap: 0, _detected: true, _confident: true,
+        });
+        apiFetch('/api/scan/resolve', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scryfall_id: top.id }),
+        }).then(r => r.json()).then(d => {
+          if (d?.card && mounted.current) setResult(prev => (prev ? { ...prev, ...d.card } : prev));
+        }).catch(() => {});
+      }
+    } catch (e) {
+      console.log('[quick-tf-error]', String(e));
+    } finally {
+      liveBusy.value = false;
+    }
+  }, [quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked, stableCount, saveCollectFrame, liveBusy]);
+
+  // Toggle collect-mode; reset any in-flight scan/lock so the switch is clean both ways.
+  const toggleCollect = useCallback(() => {
+    setCollectMode((m) => {
+      const next = !m;
+      collectModeRef.current = next;
+      return next;
+    });
+    scanBlocked.value = false;
+    stableCount.value = 0;
+    emaValid.current = false;
+    setResult(null);
+    setReading(false);
+  }, [scanBlocked, stableCount]);
+
+  // Shutter — capture one frame to documentDirectory/collect/. TFLite path: pixels live
+  // on the camera thread, so ask the worklet to deliver one frame (→ onGrabbedFrame →
+  // saveCollectFrame). ONNX path: pixels are already stashed. Pull the set with:
+  //   adb exec-out run-as app.deckforge tar c -C files collect > collect.tar
+  const captureCollect = useCallback(async () => {
+    if (collectSaving.current) return;
+    if (USE_TFLITE_DETECTOR) { collectGrab.value = true; return; }
+    await saveCollectFrame();
+  }, [saveCollectFrame, collectGrab]);
+
+  // Cumulative counter: count frames already on disk so the badge reflects the
+  // whole collection, not just this session.
+  useEffect(() => {
+    (async () => {
+      try {
+        const base = `${FileSystem.documentDirectory}collect/`;
+        const info = await FileSystem.getInfoAsync(base);
+        if (!info.exists) return;
+        const files = await FileSystem.readDirectoryAsync(base);
+        const n = files.filter((f) => f.endsWith('.jpg')).length;
+        collectCountRef.current = n;
+        setCollectCount(n);
+      } catch { /* best-effort */ }
+    })();
+  }, []);
 
 
   // Review mode: user confirms the card in the sheet
@@ -1179,40 +1533,95 @@ export default function CameraView({
 
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
+    if (USE_TFLITE_DETECTOR) {
+      // ── Camera-thread TFLite detector (synchronous, throttled) ────────────
+      // fast-tflite 2.x's model is bound to the SYNCHRONOUS frame-processor worklet
+      // runtime — calling it from runAsync's separate context segfaults. So we run it
+      // synchronously, throttled via runAtTargetFps so the camera thread isn't starved
+      // (which Broken-pipes Samsung's HAL). Per frame we marshal ONLY 8 corner numbers
+      // (onCornerResult → box); pixels go over once, on lock/collect (onGrabbedFrame).
+      if (!LIVE_AUTOSCAN || !tfReady.value || scanBlocked.value || tfModel == null) return;
+      const model = tfModel;
+      runAtTargetFps(TFLITE_FPS, () => {
+        'worklet';
+        try {
+          const rgb = resize(frame, {
+            rotation: '90deg',
+            scale: { width: 256, height: 256 }, // upright centre-square-crop → 256² RGB (HWC)
+            pixelFormat: 'rgb', dataType: 'uint8',
+          });
+          if (!fpReported.value) { fpReported.value = true; reportFp(true); }
+          // Normalise to NHWC float32 (ImageNet). resize gives HWC RGB → the model's
+          // [1,256,256,3] input is just this buffer normalised in place.
+          const N = 256 * 256;
+          const input = new Float32Array(N * 3);
+          for (let p = 0; p < N; p++) {
+            const o = p * 3;
+            input[o]     = (rgb[o]     / 255 - 0.485) / 0.229;
+            input[o + 1] = (rgb[o + 1] / 255 - 0.456) / 0.224;
+            input[o + 2] = (rgb[o + 2] / 255 - 0.406) / 0.225;
+          }
+          const outs = model.runSync([input]); // fast-tflite 2.x: TypedArray[] in/out
+          const hm = outs[0] as Float32Array;   // [1,64,64,4] NHWC raw heatmaps (already typed)
+          const H = 64, W = 64;
+          const cs = [0, 0, 0, 0, 0, 0, 0, 0];
+          let peakSum = 0;
+          for (let c = 0; c < 4; c++) {
+            let mi = 0, mv = -1e9;
+            for (let k = 0; k < H * W; k++) { const v = hm[k * 4 + c]; if (v > mv) { mv = v; mi = k; } }
+            const py = (mi / W) | 0, pxk = mi % W;
+            let sw = 0, sx = 0, sy = 0;
+            for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+              const yy = py + dy, xx = pxk + dx;
+              if (yy < 0 || yy >= H || xx < 0 || xx >= W) continue;
+              const v = hm[(yy * W + xx) * 4 + c];
+              if (v > 0) { sw += v; sx += v * xx; sy += v * yy; }
+            }
+            const ccx = sw > 0 ? sx / sw : pxk, ccy = sw > 0 ? sy / sw : py;
+            cs[c * 2] = (ccx / (W - 1)) * 256;
+            cs[c * 2 + 1] = (ccy / (H - 1)) * 256;
+            peakSum += mv;
+          }
+          const peakAvg = peakSum / 4;
+          // One-shot pixel handoff: build the number[] ONCE, only when we need it.
+          if (captureNext.value || collectGrab.value) {
+            const forCollect = collectGrab.value;
+            captureNext.value = false; collectGrab.value = false;
+            const arr: number[] = [];
+            for (let i = 0; i < rgb.length; i++) arr.push(rgb[i]);
+            onGrabbedFrame(arr, cs, peakAvg, frame.height, frame.width, forCollect);
+            return; // liveBusy released by onGrabbedFrame
+          }
+          if (peakAvg < 0.20) { onNoCard(); liveBusy.value = false; return; }
+          onCornerResult(cs, peakAvg, frame.height, frame.width);
+        } catch (e) {
+          liveBusy.value = false;
+          if (!fpErrReported.value) { fpErrReported.value = true; onFpError(String(e)); }
+        }
+      });
+      return;
+    }
+
+    // ── ONNX JS-thread detector (fallback when USE_TFLITE_DETECTOR=false) ──────
     if (!LIVE_AUTOSCAN || !embedReady.value || scanBlocked.value || liveBusy.value) return;
     frameTick.value += 1;
     if (frameTick.value % FRAME_THROTTLE !== 0) return;
-
-    // Claim the busy-lock NOW, before the expensive resize+marshal, so the next
-    // camera frames skip instead of redundantly marshalling while this one is in
-    // flight. onCornerFrame releases it in its finally; the catch below releases it
-    // if we never reach the dispatch. This is what keeps the detect→detect latency
-    // minimal (tight tracking) without piling up work on the camera thread.
     liveBusy.value = true;
     try {
-      // ROTATE the sensor frame to upright portrait FIRST, then auto centre-square-
-      // crop + resize to 256×256 RGB. Critical: the back-camera frame is landscape,
-      // so a portrait-held card lies SIDEWAYS and spans wider than the square — a
-      // landscape square-crop clips the card's ends → corner model fits a card-shaped
-      // quad to a fragment → garbage warp → "Blank Card"/"The Bean". Rotating first
-      // makes the card upright (narrower than tall) so it fits the square intact.
       const rgb = resize(frame, {
         rotation: '90deg',
-        scale: { width: 256, height: 256 }, // auto centre-square-crop of the upright frame
+        scale: { width: 256, height: 256 },
         pixelFormat: 'rgb', dataType: 'uint8',
       });
       if (!fpReported.value) { fpReported.value = true; reportFp(true); }
-
-      // Marshal to a plain number[] (typed arrays come across as zeros worklet→JS).
-      // Pass ROTATED dims (width/height swap after 90°) for the box-mapping math.
       const arr: number[] = [];
       for (let i = 0; i < rgb.length; i++) arr.push(rgb[i]);
       onCornerFrame(arr, frame.height, frame.width);
     } catch (e) {
-      liveBusy.value = false; // never dispatched → release so we don't wedge
+      liveBusy.value = false;
       if (!fpErrReported.value) { fpErrReported.value = true; onFpError(String(e)); }
     }
-  }, [embedReady, scanBlocked, liveBusy, frameTick, resize, fpReported, reportFp, fpErrReported, onFpError, onCornerFrame]);
+  }, [tfModel, tfReady, embedReady, scanBlocked, liveBusy, frameTick, resize, captureNext, collectGrab, fpReported, reportFp, fpErrReported, onFpError, onCornerFrame, onCornerResult, onGrabbedFrame]);
 
   // ── Permission / device guards ─────────────────────────────────────────────
 
@@ -1279,6 +1688,7 @@ export default function CameraView({
         pixelFormat="yuv"
         isActive={!result}
         frameProcessor={LIVE_AUTOSCAN && dbLoaded && !result ? frameProcessor : undefined}
+        onError={onCameraError}
       />
 
       {/* ── Top bar ─────────────────────────────────────────────────────── */}
@@ -1310,6 +1720,11 @@ export default function CameraView({
               <Text style={[S.modeTxt, !quickMode && S.modeTxtActive]}>👁 Review</Text>
             </Pressable>
           </View>
+
+          {/* Collect-mode toggle (training-data capture) */}
+          <Pressable style={[S.pill, collectMode && S.modeBtnActive]} onPress={toggleCollect}>
+            <Text style={S.pillTxt}>{collectMode ? '⏺' : '⊕'}</Text>
+          </Pressable>
 
           {/* DB live indicator */}
           <View style={S.pill}>
@@ -1348,7 +1763,8 @@ export default function CameraView({
       {!result && (
         <View pointerEvents="none" style={S.hintWrap}>
           <Text style={S.vfHint}>
-            {loadError ? `⚠️ Load failed: ${loadError}`
+            {collectMode ? '⏺ Collect-mode — frame any card (bare/sleeved/toploader/2–3 in view) & tap Capture'
+              : loadError ? `⚠️ Load failed: ${loadError}`
               : !dbLoaded ? `⏳ ${loadStage}`
               : escalateMsg ? escalateMsg
               : resolving ? '⚡ Saving…'
@@ -1401,12 +1817,23 @@ export default function CameraView({
       {/* ── Force scan button (bottom bar, no result) ───────────────────── */}
       {!result && (
         <View style={S.bottomBar}>
-          <Pressable style={[S.forceBtn, busy && S.btnDim]} onPress={onManualCapture} disabled={busy}>
-            {manualScanning
-              ? <ActivityIndicator color="#0a0e1a" size="small" />
-              : <Text style={S.forceTxt}>{ONDEVICE_MATCH ? '📱 Embed scan (on-device)' : SERVER_MATCH ? '✨ Embed scan (server)' : '⚡ Force scan'}</Text>}
-          </Pressable>
-          <Text style={S.aiHint}>{MAX_FREE_AI_SCANS - aiScansUsed} AI scans remaining today</Text>
+          {collectMode ? (
+            <>
+              <Pressable style={S.forceBtn} onPress={captureCollect}>
+                <Text style={S.forceTxt}>⏺ Capture frame  ·  {collectCount} saved</Text>
+              </Pressable>
+              <Text style={S.aiHint}>Saving detector frames + corners for fine-tuning</Text>
+            </>
+          ) : (
+            <>
+              <Pressable style={[S.forceBtn, busy && S.btnDim]} onPress={onManualCapture} disabled={busy}>
+                {manualScanning
+                  ? <ActivityIndicator color="#0a0e1a" size="small" />
+                  : <Text style={S.forceTxt}>{ONDEVICE_MATCH ? '📱 Embed scan (on-device)' : SERVER_MATCH ? '✨ Embed scan (server)' : '⚡ Force scan'}</Text>}
+              </Pressable>
+              <Text style={S.aiHint}>{MAX_FREE_AI_SCANS - aiScansUsed} AI scans remaining today</Text>
+            </>
+          )}
         </View>
       )}
 

@@ -38,6 +38,8 @@ export function initEmbedScan(onStage?: (s: string) => void): Promise<void> {
     // upcasts fp16→fp32 internally, matching the desktop result exactly. Slightly
     // slower per scan, but correct. (NNAPI was already a wash — ViT ops fall back.)
     onStage?.('Loading encoder…');
+    // CPU EP for accuracy. (Tried intraOpNumThreads=4 to speed the ~500ms ViT pass — it was
+    // SLOWER: it contends with the camera-thread TFLite detector. Default threading wins.)
     encoder = await InferenceSession.create(ENCODER_PATH, { executionProviders: ['cpu'] });
     onStage?.('Loading matcher…');
     matcher = await InferenceSession.create(MATCHER_PATH);
