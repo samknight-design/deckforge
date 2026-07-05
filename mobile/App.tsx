@@ -27,6 +27,12 @@ import ProfileScreen from './screens/ProfileScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import OnboardingScreen from './screens/OnboardingScreen';
 import AuthScreen from './screens/AuthScreen';
+import PlayScreen from './screens/PlayScreen';
+import GameSetupScreen from './screens/GameSetupScreen';
+import GameLobbyScreen from './screens/GameLobbyScreen';
+import GameBoardScreen from './screens/GameBoardScreen';
+import type { GameConfig } from './lib/game/formats';
+import type { SavedGame } from './lib/game/persist';
 import { XpToastProvider } from './lib/xpToast';
 import { getProfile } from './lib/db';
 
@@ -34,7 +40,7 @@ WebBrowser.maybeCompleteAuthSession();
 
 // ── Navigation types ─────────────────────────────────────────────────────────
 
-type Tab = 'home' | 'decks' | 'profile';
+type Tab = 'home' | 'decks' | 'play' | 'profile';
 
 type Screen =
   | { id: 'home' }
@@ -44,20 +50,26 @@ type Screen =
   | { id: 'deckDetail'; deck: Deck }
   | { id: 'deckSearch' }
   | { id: 'insights'; deck: Deck }
+  | { id: 'play' }
+  | { id: 'gameSetup' }
+  | { id: 'gameLobby'; config: GameConfig }
+  | { id: 'gameBoard'; config: GameConfig; resume?: SavedGame | null }
   | { id: 'profile' }
   | { id: 'settings' };
 
-const TAB_ORDER: Tab[] = ['home', 'decks', 'profile'];
+const TAB_ORDER: Tab[] = ['home', 'decks', 'play', 'profile'];
 
 const TAB_ICONS: Record<Tab, string> = {
   home: '🏠',
   decks: '🗂️',
+  play: '🎲',
   profile: '👤',
 };
 
 const TAB_LABELS: Record<Tab, string> = {
   home: 'Home',
   decks: 'Decks',
+  play: 'Play',
   profile: 'Profile',
 };
 
@@ -163,11 +175,12 @@ function AuthedApp({ session }: { session: Session }) {
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [screen, setScreen] = useState<Screen>({ id: 'home' });
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null); // null = loading
+  const [username, setUsername] = useState<string | null>(null);
 
   // Check if onboarding is needed (username not yet set)
   useEffect(() => {
     getProfile(userId)
-      .then((p) => setOnboardingDone(!!p?.username))
+      .then((p) => { setOnboardingDone(!!p?.username); setUsername(p?.username ?? null); })
       .catch(() => setOnboardingDone(true)); // On error, don't block the app
   }, [userId]);
 
@@ -230,6 +243,38 @@ function AuthedApp({ session }: { session: Session }) {
     );
   }
 
+  if (screen.id === 'gameSetup') {
+    return (
+      <GameSetupScreen
+        userId={userId}
+        onBack={goBack}
+        onStart={(config) => setScreen({ id: 'gameLobby', config })}
+      />
+    );
+  }
+
+  if (screen.id === 'gameLobby') {
+    return (
+      <GameLobbyScreen
+        config={screen.config}
+        onBack={() => setScreen({ id: 'gameSetup' })}
+        onStartGame={() => setScreen({ id: 'gameBoard', config: screen.config })}
+      />
+    );
+  }
+
+  if (screen.id === 'gameBoard') {
+    return (
+      <GameBoardScreen
+        config={screen.config}
+        userId={userId}
+        hostName={username}
+        resume={screen.resume}
+        onExit={() => { setActiveTab('play'); setScreen({ id: 'play' }); }}
+      />
+    );
+  }
+
   if (screen.id === 'settings') {
     return <SettingsScreen onBack={() => setScreen({ id: 'profile' })} userId={userId} />;
   }
@@ -274,6 +319,12 @@ function AuthedApp({ session }: { session: Session }) {
             onBack={goHome}
             onOpenDeck={(deck) => setScreen({ id: 'deckDetail', deck })}
             onGoToLibrary={() => setScreen({ id: 'library' })}
+          />
+        )}
+        {screen.id === 'play' && (
+          <PlayScreen
+            onHost={() => setScreen({ id: 'gameSetup' })}
+            onResume={(saved) => setScreen({ id: 'gameBoard', config: saved.config, resume: saved })}
           />
         )}
         {screen.id === 'deckDetail' && (

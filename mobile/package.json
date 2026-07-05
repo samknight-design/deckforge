@@ -30,6 +30,7 @@
     "expo-web-browser": "~15.0.11",
     "jpeg-js": "^0.4.4",
     "onnxruntime-react-native": "^1.24.3",
+    "qrcode-generator": "^1.5.2",
     "react": "19.1.0",
     "react-native": "0.81.5",
     "react-native-fast-opencv": "^0.4.8",
