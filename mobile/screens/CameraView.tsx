@@ -19,6 +19,7 @@ import {
   Animated,
   Dimensions,
   Image,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -33,7 +34,7 @@ import {
   runAtTargetFps,
 } from 'react-native-vision-camera';
 import { useSharedValue, useRunOnJS } from 'react-native-worklets-core';
-import { useTensorflowModel } from 'react-native-fast-tflite';
+import { useTensorflowModel, type TensorflowModelDelegate } from 'react-native-fast-tflite';
 import { useResizePlugin } from 'vision-camera-resize-plugin';
 import {
   OpenCV,
@@ -61,7 +62,17 @@ import DeckPickerSheet from '../components/DeckPickerSheet';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'tflite-v2';
+const BUILD_TAG = 'corner-fp32';
+
+// S1.2 — delegate table (§2.5.3). Preference order per platform; index 0 is the
+// production lead, later entries are fallbacks. On Android we lead with the GPU
+// delegate (fp16 model → GPU-native), then CPU. A dev pill cycles through these
+// for measurement; a load error auto-falls-back toward CPU.
+const DELEGATE_TABLE: TensorflowModelDelegate[] = Platform.select({
+  android: ['default', 'android-gpu', 'nnapi'],
+  ios: ['default', 'core-ml'],
+  default: ['default'],
+}) as TensorflowModelDelegate[];
 
 // Camera-thread detector: run the corner model as TFLite via react-native-fast-tflite
 // INSIDE the frame-processor worklet (runSync). This removes the per-frame 196k-pixel
@@ -71,8 +82,9 @@ const BUILD_TAG = 'tflite-v2';
 // back to the proven JS-thread ONNX detector (onCornerFrame) if the worklet misbehaves.
 const USE_TFLITE_DETECTOR = true;
 const TFLITE_URL = 'file:///storage/emulated/0/Android/data/app.deckforge/files/corner.tflite';
-const TFLITE_FPS = 12; // STABLE value (24 froze: camera-thread starvation). Next: decouple
-                       // visual box from detection rate (interpolate) instead of raising this.
+const TFLITE_FPS = 20; // S1.3 experiment (was 12; 24 once froze the camera thread). Watching
+                       // whether effective Hz climbs toward the ~48ms-budget ceiling (~20Hz)
+                       // without camera-thread starvation. If it starves → S1.4 decouple.
 const MISS_BEFORE_RESET = 5; // hold the box through detection gaps shorter than this (anti-jump)
 
 // Continuous auto-scan: native OpenCV detects + flattens the card every (throttled)
@@ -416,27 +428,43 @@ export default function CameraView({
   const captureNext      = useSharedValue(false);  // JS → worklet: deliver ONE frame's pixels (lock → warp+embed)
   const collectGrab      = useSharedValue(false);  // collect-mode shutter → worklet: deliver one frame to save
   const tfReady          = useSharedValue(false);  // TFLite corner model loaded (worklet gate)
+  // S0 perf HUD — the worklet writes these timings; JS polls them (worklet shared-value
+  // writes don't trigger a React re-render, so a light interval reads them for display).
+  const hudDetMs         = useSharedValue(0);      // last detector runSync duration (ms)
+  const hudWlMs          = useSharedValue(0);      // last full frame-processor callback duration (ms)
+  const hudDetCount      = useSharedValue(0);      // detector runs so far → effective Hz via delta
+  const hudResizeMs      = useSharedValue(0);      // resize()  ms (budget breakdown)
+  const hudNormMs        = useSharedValue(0);      // uint8→float32 ImageNet normalise loop ms
+  const hudDecodeMs      = useSharedValue(0);      // heatmap argmax+centroid decode ms
 
   // TFLite corner detector — loaded once from the device files dir. The source MUST be a
   // stable ref: a fresh { url } literal each render made the hook reload the model on EVERY
   // render (the scanner re-renders constantly) → hundreds of model loads → OOM crash + the
   // "failed to load Tensorflow Model" ×200 spam. useMemo loads it exactly once.
   const tfSource = useMemo(() => ({ url: TFLITE_URL }), []);
-  const tflite  = useTensorflowModel(tfSource); // fast-tflite 2.x: default CPU delegate
+  // S1.2 — delegate selection. Cycled by a dev pill for measurement; auto-falls-back
+  // toward CPU on a load error. The hook reloads the model whenever `delegate` changes.
+  const [delegateIdx, setDelegateIdx] = useState(0); // CPU default (delegates gave no real gain — S1.2)
+  const delegate = DELEGATE_TABLE[delegateIdx] ?? 'default';
+  const tflite  = useTensorflowModel(tfSource, delegate);
   // Only expose the model object when the TFLite detector is actually active. Otherwise
   // the Nitro HybridObject leaks into the vision-camera worklet closure and throws
   // ("no NativeState") because worklets-core can't share it. ONNX mode → null.
   const tfModel = (USE_TFLITE_DETECTOR && tflite.state === 'loaded') ? tflite.model : null;
+  // The delegate that ACTUALLY bound — a GPU/NNAPI delegate can silently fall back to
+  // CPU inside TFLite, so surface the real one so measurement isn't fooled.
+  const activeDelegate = tflite.state === 'loaded' ? tflite.model.delegate : delegate;
   useEffect(() => {
     tfReady.value = tfModel != null;
-    console.log('[detector]', USE_TFLITE_DETECTOR ? 'TFLITE' : 'ONNX', '·', BUILD_TAG, '· tflite:', tflite.state);
+    console.log('[detector]', USE_TFLITE_DETECTOR ? 'TFLITE' : 'ONNX', '·', BUILD_TAG, '· req:', delegate, '· tflite:', tflite.state);
     if (tflite.state === 'error') {
-      console.warn('[tflite] load error', tflite.error);
-      if (USE_TFLITE_DETECTOR) setEmbedStatus(`tflite load failed: ${String(tflite.error).slice(0, 60)}`);
+      console.warn(`[tflite] load error (delegate=${delegate})`, tflite.error);
+      if (delegate !== 'default') setDelegateIdx(0); // per-device delegate failed → CPU
+      else if (USE_TFLITE_DETECTOR) setEmbedStatus(`tflite load failed: ${String(tflite.error).slice(0, 60)}`);
     } else if (tflite.state === 'loaded') {
-      console.log('[tflite] corner model loaded ✓');
+      console.log(`[tflite] corner model loaded ✓ (delegate=${tflite.model.delegate})`);
     }
-  }, [tflite, tfModel, tfReady]);
+  }, [tflite, tfModel, tfReady, delegate]);
 
   // Called from the worklet (once) to report whether raw-pixel access works.
   const reportFp = useRunOnJS((ok: boolean) => {
@@ -453,6 +481,15 @@ export default function CameraView({
   const lastAlign = useRef(0);
   const lastRot = useRef(0);
   const missCount = useRef(0); // consecutive no-card frames (hysteresis so a brief gap doesn't snap the box)
+  // ── S0 perf HUD (dev-only, toggle from the top bar) ──────────────────────────
+  const [showHud, setShowHud] = useState(true);
+  const [hud, setHud] = useState({ det: 0, wl: 0, hz: 0, emb: 0, match: 0, lock: 0, id: 0, rz: 0, nm: 0, dc: 0 });
+  const firstSeenRef    = useRef(0);     // ts a valid card quad first entered frame (e2e timers)
+  const lockRecordedRef = useRef(false); // latch so lock ms is captured once per card
+  const hudLockRef  = useRef(0);         // last e2e lock ms (corners → LOCKED)
+  const hudIdRef    = useRef(0);         // last e2e ID ms (corners → confident add)
+  const hudEmbRef   = useRef(0);         // last SigLIP embed-confirm ms
+  const hudMatchRef = useRef(0);         // last matcher ms
   const lastTopId = useRef('');   // top-match id across attempts (temporal consensus)
   const lastTopCount = useRef(0);
   // Actual rendered preview size (measured) — the camera draws edge-to-edge, which
@@ -521,6 +558,7 @@ export default function CameraView({
     if (!mounted.current) return;
     missCount.current += 1;
     if (missCount.current < MISS_BEFORE_RESET) return; // hold the box through a brief detection gap
+    firstSeenRef.current = 0; lockRecordedRef.current = false; // S0 HUD: card left → reset e2e timers
     lastRot.current = 0;
     springTo(0, 0, 1, 1, 0);
     if (lastAlign.current !== 0) { lastAlign.current = 0; setAlignState(0); }
@@ -619,6 +657,35 @@ export default function CameraView({
         if (mounted.current) setEmbedStatus('embed init failed: ' + (e?.message || e));
       });
   }, []);
+
+  // S0 perf HUD poll — reads the worklet timing shared values + JS-side e2e refs
+  // ~2.5×/s and folds them into one setState (never per-frame). Effective detection
+  // Hz = Δ(detector run count) / Δt.
+  useEffect(() => {
+    if (!showHud) return;
+    let lastCount = hudDetCount.value, lastT = Date.now();
+    const t = setInterval(() => {
+      const now = Date.now(), c = hudDetCount.value;
+      const dt = Math.max(1, now - lastT);
+      const hz = Math.round(((c - lastCount) * 1000 / dt) * 10) / 10;
+      lastCount = c; lastT = now;
+      // EMA-smooth the per-frame worklet timings (spec asks for rolling averages);
+      // hz is already a windowed average over the poll interval.
+      setHud(prev => ({
+        det: prev.det ? Math.round(hudDetMs.value * 0.35 + prev.det * 0.65) : Math.round(hudDetMs.value),
+        wl: prev.wl ? Math.round(hudWlMs.value * 0.35 + prev.wl * 0.65) : Math.round(hudWlMs.value),
+        hz,
+        emb: hudEmbRef.current,
+        match: hudMatchRef.current,
+        lock: hudLockRef.current,
+        id: hudIdRef.current,
+        rz: prev.rz ? Math.round(hudResizeMs.value * 0.35 + prev.rz * 0.65) : Math.round(hudResizeMs.value),
+        nm: prev.nm ? Math.round(hudNormMs.value * 0.35 + prev.nm * 0.65) : Math.round(hudNormMs.value),
+        dc: prev.dc ? Math.round(hudDecodeMs.value * 0.35 + prev.dc * 0.65) : Math.round(hudDecodeMs.value),
+      }));
+    }, 400);
+    return () => clearInterval(t);
+  }, [showHud, hudDetCount, hudDetMs, hudWlMs, hudResizeMs, hudNormMs, hudDecodeMs]);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1042,6 +1109,9 @@ export default function CameraView({
         return;
       }
       rejectSince.current = 0;
+      hudEmbRef.current = embMs; hudMatchRef.current = matchMs; // S0 HUD: embed/match confirm ms
+      if (firstSeenRef.current) hudIdRef.current = Date.now() - firstSeenRef.current; // S0 HUD: e2e ID ms
+      firstSeenRef.current = 0; lockRecordedRef.current = false; // reset e2e timers per-card (even in back-to-back scans)
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       if (quickMode) {
         await doAdd({ scryfall_id: top.id, card_name: top.name }, false, currentDeck);
@@ -1136,6 +1206,7 @@ export default function CameraView({
         stableCount.value = 0; emaValid.current = false; onNoCard(); return;
       }
       missCount.current = 0; // valid card → clear the no-card hysteresis
+      if (firstSeenRef.current === 0) firstSeenRef.current = Date.now(); // S0 HUD: e2e timer start
 
       const VW = viewSize.current.w, VH = viewSize.current.h;
       const mscale = Math.max(VW / fw, VH / fh);
@@ -1173,6 +1244,10 @@ export default function CameraView({
         Math.max(0.2, Math.min(2.4, sw / BOX_W)), Math.max(0.2, Math.min(2.4, sh / BOX_H)), ang,
       );
       if (fState !== lastAlign.current) { lastAlign.current = fState; setAlignState(fState as 0 | 1 | 2); }
+      if (fState === 2 && !lockRecordedRef.current) {      // S0 HUD: e2e lock ms (corners → LOCKED)
+        lockRecordedRef.current = true;
+        hudLockRef.current = firstSeenRef.current ? Date.now() - firstSeenRef.current : 0;
+      }
 
       if (collectModeRef.current) return;                  // collect: box only, shutter grabs
       if (stableCount.value < STABLE_FRAMES_NEEDED) return;
@@ -1263,6 +1338,9 @@ export default function CameraView({
         return;
       }
       rejectSince.current = 0;
+      hudEmbRef.current = embMs; hudMatchRef.current = matchMs; // S0 HUD: embed/match confirm ms
+      if (firstSeenRef.current) hudIdRef.current = Date.now() - firstSeenRef.current; // S0 HUD: e2e ID ms
+      firstSeenRef.current = 0; lockRecordedRef.current = false; // reset e2e timers per-card (even in back-to-back scans)
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       if (quickMode) {
         await doAdd({ scryfall_id: top.id, card_name: top.name }, false, currentDeck);
@@ -1545,11 +1623,13 @@ export default function CameraView({
       runAtTargetFps(TFLITE_FPS, () => {
         'worklet';
         try {
+          const _t0 = performance.now(); // S0 HUD: full callback budget
           const rgb = resize(frame, {
             rotation: '90deg',
             scale: { width: 256, height: 256 }, // upright centre-square-crop → 256² RGB (HWC)
             pixelFormat: 'rgb', dataType: 'uint8',
           });
+          const _tR = performance.now(); hudResizeMs.value = _tR - _t0; // S0 HUD: resize ms
           if (!fpReported.value) { fpReported.value = true; reportFp(true); }
           // Normalise to NHWC float32 (ImageNet). resize gives HWC RGB → the model's
           // [1,256,256,3] input is just this buffer normalised in place.
@@ -1561,7 +1641,9 @@ export default function CameraView({
             input[o + 1] = (rgb[o + 1] / 255 - 0.456) / 0.224;
             input[o + 2] = (rgb[o + 2] / 255 - 0.406) / 0.225;
           }
+          const _tN = performance.now(); hudNormMs.value = _tN - _tR; // S0 HUD: normalise-loop ms
           const outs = model.runSync([input]); // fast-tflite 2.x: TypedArray[] in/out
+          const _tI = performance.now(); hudDetMs.value = _tI - _tN; // S0 HUD: detector inference ms
           const hm = outs[0] as Float32Array;   // [1,64,64,4] NHWC raw heatmaps (already typed)
           const H = 64, W = 64;
           const cs = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -1583,6 +1665,10 @@ export default function CameraView({
             peakSum += mv;
           }
           const peakAvg = peakSum / 4;
+          const _tD = performance.now();
+          hudDecodeMs.value = _tD - _tI;           // S0 HUD: heatmap decode ms
+          hudWlMs.value = _tD - _t0;               // S0 HUD: whole callback budget
+          hudDetCount.value += 1;                  // S0 HUD: effective detection rate
           // One-shot pixel handoff: build the number[] ONCE, only when we need it.
           if (captureNext.value || collectGrab.value) {
             const forCollect = collectGrab.value;
@@ -1621,7 +1707,7 @@ export default function CameraView({
       liveBusy.value = false;
       if (!fpErrReported.value) { fpErrReported.value = true; onFpError(String(e)); }
     }
-  }, [tfModel, tfReady, embedReady, scanBlocked, liveBusy, frameTick, resize, captureNext, collectGrab, fpReported, reportFp, fpErrReported, onFpError, onCornerFrame, onCornerResult, onGrabbedFrame]);
+  }, [tfModel, tfReady, embedReady, scanBlocked, liveBusy, frameTick, resize, captureNext, collectGrab, fpReported, reportFp, fpErrReported, onFpError, onCornerFrame, onCornerResult, onGrabbedFrame, hudDetMs, hudWlMs, hudDetCount, hudResizeMs, hudNormMs, hudDecodeMs]);
 
   // ── Permission / device guards ─────────────────────────────────────────────
 
@@ -1726,6 +1812,16 @@ export default function CameraView({
             <Text style={S.pillTxt}>{collectMode ? '⏺' : '⊕'}</Text>
           </Pressable>
 
+          {/* S0 perf-HUD toggle (dev) */}
+          <Pressable style={[S.pill, showHud && S.modeBtnActive]} onPress={() => setShowHud(v => !v)}>
+            <Text style={S.pillTxt}>📊</Text>
+          </Pressable>
+
+          {/* S1.2 delegate cycle (dev): CPU → GPU → NN */}
+          <Pressable style={[S.pill, delegateIdx !== 0 && S.modeBtnActive]} onPress={() => setDelegateIdx(i => (i + 1) % DELEGATE_TABLE.length)}>
+            <Text style={S.pillTxt}>{delegate === 'default' ? 'CPU' : delegate === 'android-gpu' ? 'GPU' : delegate === 'nnapi' ? 'NN' : delegate}</Text>
+          </Pressable>
+
           {/* DB live indicator */}
           <View style={S.pill}>
             <View style={[S.dot, dbLoaded && S.dotReady]} />
@@ -1782,7 +1878,7 @@ export default function CameraView({
       {!result && (
         <View pointerEvents="none" style={S.diag}>
           <Text style={S.diagText}>
-            [{BUILD_TAG}]  DB: {dbLoaded ? `✓ ${dbCount}` : '…'}   ·   Auto-scan: {
+            [{BUILD_TAG}·{activeDelegate === 'default' ? 'CPU' : activeDelegate}]  DB: {dbLoaded ? `✓ ${dbCount}` : '…'}   ·   Auto-scan: {
               fpStatus === 'active' ? '✓ live' : fpStatus === 'unavailable' ? '✗' : dbLoaded ? '…ready' : '…'
             }
           </Text>
@@ -1790,6 +1886,16 @@ export default function CameraView({
             {ONDEVICE_MATCH ? embedStatus
               : liveDist != null ? `last match dist=${liveDist} (lower=better, ≤${AUTO_MAX_DIST} adds)` : 'hold a card steady in the box'}
           </Text>
+        </View>
+      )}
+
+      {/* ── S0 perf HUD (dev-only; toggle 📊 in the top bar) ────────────── */}
+      {!result && showHud && (
+        <View pointerEvents="none" style={S.perfHud}>
+          <Text style={S.perfHudText}>det {hud.det}ms · {hud.hz}Hz · wl {hud.wl}ms</Text>
+          <Text style={S.perfHudText}>rz {hud.rz}ms · nm {hud.nm}ms · dc {hud.dc}ms</Text>
+          <Text style={S.perfHudText}>emb {hud.emb || '–'}ms · match {hud.match || '–'}ms</Text>
+          <Text style={S.perfHudText}>lock {hud.lock || '–'}ms · id {hud.id || '–'}ms</Text>
         </View>
       )}
 
@@ -1990,6 +2096,16 @@ const S = StyleSheet.create({
     borderRadius: 8, overflow: 'hidden',
   },
   debugLine: { color: '#fbbf24', fontSize: 11, fontWeight: '700', marginBottom: 4 },
+
+  // S0 perf HUD — top-left below the diag strip, in clear space; never intercepts touches.
+  perfHud: {
+    position: 'absolute', left: 12, top: 132, alignItems: 'flex-start', gap: 2,
+  },
+  perfHudText: {
+    color: '#34d399', fontSize: 11, fontWeight: '700', fontVariant: ['tabular-nums'],
+    backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 8, paddingVertical: 2,
+    borderRadius: 6, overflow: 'hidden',
+  },
 
   // Flash notification
   notif: {

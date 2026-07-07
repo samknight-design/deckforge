@@ -155,6 +155,9 @@ anything. Every subsequent step records its delta here.
    variant). The training pipeline lives with the heatmap-detector work (see
    memory `corner_detector_heatmap`). Validate corner accuracy vs the current
    model on the §7 test set — accept ≤ 2 px mean corner error at 256-space.
+   → **DONE 2026-07-05, BOTH REJECTED — see §8 "S1.1 RESULT". int8 collapses
+   the model (185–193 px); 192² doubles corner error (13 px). Ship fp16 @256;
+   get the speed from S1.2 delegate + S1.4 decouple instead.**
 2. **Try delegates** in order, measuring each: `android-gpu` → CPU-int8-XNNPACK
    (multi-thread). Keep whichever is fastest *and stable* (delegates can fail
    per-device; wrap in try/fallback-to-CPU like the encoder fix did).
@@ -320,7 +323,94 @@ against the same cards in ManaBox on the same phone — that's the bar.
 
 | Date | Phase | Device | Det Hz | Det ms | Lock ms | ID ms (med) | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| — | S0 baseline | (fill in) | | | | | |
+| 2026-07-05 | S0 baseline | Samsung R5CWB1VGYVM | ~10 (eff) | ~21 | ~711 | (lock-bound) | fp32@256, **default CPU delegate**, TFLITE_FPS=12. wl budget ~50–60 ms. embed ~650–760 ms + match ~30–50 ms (async, once at lock). |
+
+**S0 baseline notes (2026-07-05, measured via the new perf HUD):**
+- **The detector cannot sustain even its own 12 Hz throttle — effective ~10 Hz.**
+  Inference ~21 ms but the *whole* worklet callback (resize→normalise→infer→
+  decode) is ~50–60 ms; at 30 fps camera that caps effective detection ~10 Hz.
+  This is the steppy-overlay root cause, and the number S1.2 (GPU delegate) +
+  S1.4 (decouple) must beat.
+- **Recognition is NOT the bottleneck.** embed ~700 ms + match ~40 ms runs async
+  once at lock, off the camera thread — user confirms "identification is very
+  quick; it's the lock-on/capture that takes longest." So S1/S2 (detector speed
+  + smoothing/coasting) is exactly the right target; the embed ladder is untouched.
+- Lock (first-seen→LOCKED overlay) ~711 ms in a clean case; e2e time-to-add is
+  dominated by the lock-on/stability struggle, not embed. HUD `id` reads per-card
+  now (resets on add + on card-exit).
+
+### S1.2 RESULT (2026-07-05) — delegates give NO real gain (budget-bound)
+
+Measured idle detector timing per delegate (fp32@256, Samsung R5CWB1VGYVM), via
+the HUD delegate-cycle pill / start-index:
+
+| Delegate | Inference ms | Effective Hz | Worklet budget ms |
+| --- | --- | --- | --- |
+| default (CPU) | 22 | 10.0 | 48 |
+| android-gpu | 19 | 10.1 | 48 |
+| nnapi | 21 | 10.9 | 48 |
+
+All three loaded fine; **none moves effective Hz or the budget.** The detector is
+**budget-bound, not inference-bound** — inference is only ~20 ms of ~48 ms. Like
+int8 (S1.1), delegates are a dead end here. **Budget breakdown** (added HUD line):
+
+```
+resize 3 ms  +  normalise 15 ms  +  inference 22 ms  +  decode 1 ms  +  ~5 ms overhead
+```
+
+- The **normalise loop** (uint8→float32 ImageNet, 196k px × 3 divides) is ~15 ms
+  = a third of the budget. A precomputed uint8→float **LUT did NOT help** (~17 ms):
+  Hermes has no JIT, so the ~196k-iteration interpreted loop is the cost, not the
+  arithmetic. To cut it you must *eliminate* the loop — bake normalisation into the
+  model (uint8 input + Mul/Add first ops) so the worklet feeds the raw resize bytes
+  straight in (skips both the loop AND the 196k Float32Array build). Deferred: it's a
+  model re-export, and model-conversion has bitten twice (int8 broke, fp16 won't load).
+
+### S1.3 RESULT (2026-07-05) — raising the FPS throttle works
+
+`TFLITE_FPS` 12 → **20** raised **effective detection 10 → 15 Hz** with **no camera
+starvation** (the old "24 froze it" note predates this measurement; at 20 the camera
+stays live — a transient Broken-pipe on launch reconfigure recovers). Budget 48 ms
+caps the ceiling at ~21 Hz, so 15 Hz approaches but doesn't hit it. Kept at 20.
+**Net S1 detector state: 15 Hz (from 10), CPU, fp32@256.** Further raw-Hz gains need
+model-baked normalise (−15 ms → ~33 Hz ceiling) or S1.4 decouple. Per the plan's own
+thesis, **15 Hz + S2 (One-Euro + coasting) should already feel like ManaBox** — so S2
+is the higher-value next step over grinding more detector ms.
+
+### S1.1 RESULT (2026-07-05) — int8 and 192² BOTH rejected on accuracy
+
+Validated in `scanner-spike/` (`convert_int8.py`, `export_192.py`) against 150
+val crops; abs corner error measured in 256-space, drift vs each source's own
+ONNX. **Bar was drift ≤ 2 px, no absolute regression.**
+
+| Variant | Abs err (px) | Drift (px) | Size | Verdict |
+| --- | --- | --- | --- | --- |
+| ONNX 256 (baseline) | 7.08 | — | — | — |
+| TFLite fp32 @256 | 7.08 | 0.00 | 6.75 MB | ✅ lossless |
+| TFLite **fp16 @256** | (≈0 on-device) | ~0 | **3.24 MB** | ✅ **the pick** |
+| TFLite int8 dynamic-range @256 | **185.9** | 185.2 | 1.86 MB | ❌ catastrophic |
+| TFLite int8 full-integer @256 | **193.2** | 192.6 | 1.86 MB | ❌ catastrophic |
+| ONNX 192 | 12.93 | — | — | ❌ ~2× looser |
+| TFLite fp32 @192 | 12.93 | 0.00 | 6.75 MB | ❌ too loose for SigLIP |
+| TFLite int8 @192 | 180.4 | 180.4 | 1.86 MB | ❌ catastrophic |
+
+**Findings that revise §2's assumptions:**
+1. **int8 is dead for this corner model.** dynamic-range int8 quantizes *only
+   weights* (no calibration) and still collapses to 185 px → int8 **weights
+   alone** destroy the heatmap head (same failure class as the SigLIP int8
+   disaster). Not a calibration bug: fp32/fp16 convert losslessly through the
+   same pipeline. Per-channel, full-integer (calibrated on 200 real crops), and
+   int16-act variants all fail identically.
+2. **192² input is dead too.** 7.08 → 12.93 px is a train/test resolution
+   mismatch (model trained at 256); 13 px is in the known-bad range that
+   collapses SigLIP onto blank cards. Re-training a native-192 model was not
+   attempted — deferred (would need a fresh train run for a marginal MAC saving).
+3. **Therefore the detector speedup CANNOT come from precision/input shrink.**
+   The model stays **fp16 @256** (half the fp32 size, drift ~0, GPU-delegate
+   friendly). All S1 speed must come from **S1.2 (GPU/CoreML delegate)** and
+   **S1.4 (camera-thread decouple)** — not S1.1. Update §2's int8/192² row
+   accordingly: rejected on this architecture. fp16 is the shippable artifact
+   (`scanner-spike/corner_f16.tflite`, already exported).
 
 ---
 
