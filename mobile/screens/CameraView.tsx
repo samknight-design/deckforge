@@ -57,12 +57,13 @@ import { useTheme } from '../lib/theme';
 import { tryCompleteChallenge } from '../lib/challenges';
 import { useXpToast } from '../lib/xpToast';
 import DeckPickerSheet from '../components/DeckPickerSheet';
+import QuadOverlay, { type QuadHandle } from '../components/QuadOverlay';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'corner-fp32';
+const BUILD_TAG = 'corner-v3-persp';
 
 // S1.2 — delegate table (§2.5.3). Preference order per platform; index 0 is the
 // production lead, later entries are fallbacks. On Android we lead with the GPU
@@ -82,10 +83,36 @@ const DELEGATE_TABLE: TensorflowModelDelegate[] = Platform.select({
 // back to the proven JS-thread ONNX detector (onCornerFrame) if the worklet misbehaves.
 const USE_TFLITE_DETECTOR = true;
 const TFLITE_URL = 'file:///storage/emulated/0/Android/data/app.deckforge/files/corner.tflite';
-const TFLITE_FPS = 20; // S1.3 experiment (was 12; 24 once froze the camera thread). Watching
-                       // whether effective Hz climbs toward the ~48ms-budget ceiling (~20Hz)
-                       // without camera-thread starvation. If it starves → S1.4 decouple.
-const MISS_BEFORE_RESET = 5; // hold the box through detection gaps shorter than this (anti-jump)
+// ── Detector rate (PERF SLIDERS) ─────────────────────────────────────────────
+// The detector's normalise+inference (~40ms) runs on the camera thread EVERY frame it
+// fires. Running it flat-out continuously is the main heat source (thermal throttle →
+// the "gradually more laggy" you saw). So the rate is ADAPTIVE: crawl when no card is in
+// view (just enough to notice one appear), ramp up only while actively tracking a card.
+// These two numbers are the perf dials — lower = cooler/less lag, higher = snappier.
+const DETECT_FPS_IDLE   = 4;   // no card in frame → just watch for one (low heat)
+const DETECT_FPS_ACTIVE = 12;  // card in frame → track it smoothly
+const MISS_BEFORE_RESET = 2; // hold the quad through only a 1-2 frame blip (~130ms), then HIDE it —
+                             // so the box vanishes over the gap between cards (ManaBox: no card, no box)
+                             // instead of coasting/swooping across to the next one.
+// Card-presence gate: mean heatmap peak below this = no real card in frame → no box. Real cards
+// score ~1.0-1.25 (measured), non-card desk/gaps score low, so a firm 0.40 cleanly rejects the gap.
+const CARD_PRESENCE_MIN = 0.40;
+
+// ── S2 One-Euro filter ───────────────────────────────────────────────────────
+// Adaptive low-pass (Casiez et al. 2012) on the corner positions: at low speed the
+// cutoff is low → heavy smoothing (rock-solid when the card is still); as the card
+// moves, the cutoff rises with speed → light smoothing (tight follow, no lag). This
+// replaces the fixed-alpha EMA, which had to compromise between jitter and lag.
+// Tune live: OE_MIN_CUTOFF lower = steadier when still; OE_BETA higher = snappier
+// when moving. Values are for corner coords in *frame pixels* at ~15 Hz.
+const OE_MIN_CUTOFF = 0.5;   // Hz, cutoff at zero speed — LOW = reject hand tremor hard
+const OE_BETA       = 0.007; // speed coefficient (px/s → added cutoff): still tracks real motion
+const OE_DCUTOFF    = 1.0;   // derivative low-pass cutoff
+
+function oeAlpha(cutoff: number, dt: number): number {
+  const tau = 1 / (2 * Math.PI * cutoff);
+  return 1 / (1 + tau / dt);
+}
 
 // Continuous auto-scan: native OpenCV detects + flattens the card every (throttled)
 // frame on the camera thread; the heavy 114k match runs once on the JS thread only
@@ -336,12 +363,18 @@ export default function CameraView({
   const cameraRef = useRef<Camera>(null);
   const notifTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rejectSince = useRef(0); // when a steady card first failed to match (for AI escalation)
+  const captureCooldownUntil = useRef(0); // throttle between background recognition attempts (ms epoch)
+  const captureArmed = useRef(true);      // ONE grab per settle: consumed on capture, re-armed when the card moves / leaves
   const lastDumpAt = useRef(0);  // throttle for the DUMP_WARP diagnostic
   const dumpIdx = useRef(0);     // rotating filename index for warp dumps
   const lastQuadCx = useRef(0);  // last corner-model quad centroid (frame space, stability)
   const lastQuadCy = useRef(0);
-  const emaPts = useRef<Array<{ x: number; y: number }>>([]); // EMA-smoothed box corners (frame space)
-  const emaValid = useRef(false); // false → next detection seeds the EMA (no drag from a stale lock)
+  // S2 One-Euro filter state for the 8 corner scalars ([tl,tr,br,bl] × x,y, frame space).
+  // xr = last raw sample (for the derivative), xf = last filtered output, df = last
+  // filtered derivative, t = last timestamp (ms). emaValid gates seeding (kept as the
+  // name because every reset site already flips it): false → next detection re-seeds.
+  const oe = useRef<{ xr: number[]; xf: number[]; df: number[]; t: number }>({ xr: [], xf: [], df: [], t: 0 });
+  const emaValid = useRef(false); // false → next detection re-seeds the filter (no drag from a stale lock)
 
   // Crisp preview (720p). The dhash worklet samples with a stride, so its cost
   // stays bounded regardless of frame resolution — no need to cripple the preview.
@@ -414,7 +447,9 @@ export default function CameraView({
 
   const consecutiveCount = useSharedValue(0);
   const lastMatchIndex   = useSharedValue(-1);
-  const scanBlocked      = useSharedValue(false);
+  const scanBlocked      = useSharedValue(false); // freezes the detector — for manual/Force-Scan snapshots ONLY
+  const recognizing      = useSharedValue(false); // a background embed is in flight — gates CAPTURE, never the box tracking
+  const cardActiveSV     = useSharedValue(false); // worklet: a card is currently in frame → run the detector at the active (faster) rate
   const fpReported       = useSharedValue(false); // report fp health to JS only once
   const fpErrReported    = useSharedValue(false); // report a worklet error only once
   const frameTick        = useSharedValue(0);     // throttle counter
@@ -478,6 +513,7 @@ export default function CameraView({
   const trackSX = useRef(new Animated.Value(1)).current;  // scaleX vs BOX_W
   const trackSY = useRef(new Animated.Value(1)).current;  // scaleY vs BOX_H
   const trackRot = useRef(new Animated.Value(0)).current; // rotation (deg) to match card tilt
+  const quadRef = useRef<QuadHandle>(null); // S3 interim — true perspective-quad overlay
   const lastAlign = useRef(0);
   const lastRot = useRef(0);
   const missCount = useRef(0); // consecutive no-card frames (hysteresis so a brief gap doesn't snap the box)
@@ -492,6 +528,7 @@ export default function CameraView({
   const hudMatchRef = useRef(0);         // last matcher ms
   const lastTopId = useRef('');   // top-match id across attempts (temporal consensus)
   const lastTopCount = useRef(0);
+  const lastAddedId = useRef(''); // last auto-added card id — skip re-adding it while still in frame (cleared on card-exit)
   // Actual rendered preview size (measured) — the camera draws edge-to-edge, which
   // is LARGER than Dimensions.get('window') (that excludes the status bar). Using
   // the real size is what makes the overlay land exactly on the card.
@@ -521,6 +558,32 @@ export default function CameraView({
     if (MAP_FLIP_Y) ry = rotH - ry;
     const s = Math.max(VW / rotW, VH / rotH);
     return { x: rx * s - (rotW * s - VW) / 2, y: ry * s - (rotH * s - VH) / 2 };
+  }, []);
+
+  // S2 — One-Euro filter over the 8 corner scalars. `emaValid.current === false`
+  // seeds the filter from the current sample (fresh acquisition, no drag across a
+  // gap); every reset site already flips emaValid false. Returns the filtered array.
+  const oneEuro8 = useCallback((raw: number[]): number[] => {
+    const s = oe.current;
+    const now = Date.now();
+    if (!emaValid.current || s.xf.length !== raw.length) {
+      s.xr = raw.slice(); s.xf = raw.slice(); s.df = new Array(raw.length).fill(0);
+      s.t = now; emaValid.current = true;
+      return s.xf.slice();
+    }
+    const dt = Math.max(0.001, (now - s.t) / 1000); // seconds
+    const out = new Array(raw.length);
+    for (let i = 0; i < raw.length; i++) {
+      const dx = (raw[i] - s.xr[i]) / dt;
+      const aD = oeAlpha(OE_DCUTOFF, dt);
+      const edx = aD * dx + (1 - aD) * s.df[i];
+      const cutoff = OE_MIN_CUTOFF + OE_BETA * Math.abs(edx);
+      const aX = oeAlpha(cutoff, dt);
+      const xf = aX * raw[i] + (1 - aX) * s.xf[i];
+      s.xr[i] = raw[i]; s.df[i] = edx; s.xf[i] = xf; out[i] = xf;
+    }
+    s.t = now;
+    return out;
   }, []);
 
   // Called from the worklet EVERY detected frame with the FOUR ordered card
@@ -557,9 +620,13 @@ export default function CameraView({
   const onNoCard = useRunOnJS(() => {
     if (!mounted.current) return;
     missCount.current += 1;
-    if (missCount.current < MISS_BEFORE_RESET) return; // hold the box through a brief detection gap
+    if (missCount.current < MISS_BEFORE_RESET) return; // hold the quad through a brief detection gap (coast)
     firstSeenRef.current = 0; lockRecordedRef.current = false; // S0 HUD: card left → reset e2e timers
+    lastAddedId.current = ''; // card left → allow the next card (or this one re-presented) to be added
+    captureArmed.current = true; // card left → re-arm so the next card grabs a fresh still frame
     lastRot.current = 0;
+    emaValid.current = false; // real loss (coast expired) → next acquisition re-seeds the filter fresh
+    quadRef.current?.set(null, '#10b981'); // hide the perspective quad (card lost)
     springTo(0, 0, 1, 1, 0);
     if (lastAlign.current !== 0) { lastAlign.current = 0; setAlignState(0); }
   }, [springTo]);
@@ -999,17 +1066,9 @@ export default function CameraView({
       // EMA-smooth the corners (frame space) for a jitter-free, gliding hug. The raw
       // fpt is still used for stability + the warp crop (precision matters there); only
       // the visible BOX is smoothed. Seeding on first detection avoids a slide-in.
-      const A = 0.5; // higher = snappier, lower = smoother
-      if (!emaValid.current || emaPts.current.length !== 4) {
-        emaPts.current = fpt.map((p) => ({ x: p.x, y: p.y }));
-        emaValid.current = true;
-      } else {
-        for (let i = 0; i < 4; i++) {
-          emaPts.current[i].x += A * (fpt[i].x - emaPts.current[i].x);
-          emaPts.current[i].y += A * (fpt[i].y - emaPts.current[i].y);
-        }
-      }
-      const spt = emaPts.current;
+      // S2 — adaptive One-Euro smoothing on the 4 corners (steady still, tight moving).
+      const _oe = oneEuro8([fpt[0].x, fpt[0].y, fpt[1].x, fpt[1].y, fpt[2].x, fpt[2].y, fpt[3].x, fpt[3].y]);
+      const spt = [{ x: _oe[0], y: _oe[1] }, { x: _oe[2], y: _oe[3] }, { x: _oe[4], y: _oe[5] }, { x: _oe[6], y: _oe[7] }];
       const p0 = mp(spt[0]), p1 = mp(spt[1]), p2 = mp(spt[2]), p3 = mp(spt[3]);
       const cx = (p0.x + p1.x + p2.x + p3.x) / 4, cy = (p0.y + p1.y + p2.y + p3.y) / 4;
       const sw = (dd(p0, p1) + dd(p2, p3)) / 2, sh = (dd(p1, p2) + dd(p3, p0)) / 2;
@@ -1023,12 +1082,11 @@ export default function CameraView({
       const qcy = (fpt[0].y + fpt[1].y + fpt[2].y + fpt[3].y) / 4;
       const moved = Math.abs(qcx - lastQuadCx.current) + Math.abs(qcy - lastQuadCy.current);
       lastQuadCx.current = qcx; lastQuadCy.current = qcy;
-      stableCount.value = moved < sq * 0.04 ? stableCount.value + 1 : 1;
+      stableCount.value = moved < sq * 0.055 ? stableCount.value + 1 : 1;
       const fState = stableCount.value >= STABLE_FRAMES_NEEDED ? 2 : 1;
-      springTo(
-        cx - viewSize.current.w / 2, cy - viewSize.current.h / 2,
-        Math.max(0.2, Math.min(2.4, sw / BOX_W)), Math.max(0.2, Math.min(2.4, sh / BOX_H)), ang,
-      );
+      // S3 interim — draw the true perspective quad through the 4 smoothed corners
+      // (green when LOCKED, amber while still settling). Replaces the rotated box.
+      quadRef.current?.set([p0, p1, p2, p3], fState === 2 ? '#10b981' : '#f59e0b');
       if (fState !== lastAlign.current) { lastAlign.current = fState; setAlignState(fState as 0 | 1 | 2); }
 
       if (stableCount.value < STABLE_FRAMES_NEEDED) return;
@@ -1038,8 +1096,7 @@ export default function CameraView({
       if (collectModeRef.current) { stableCount.value = 0; return; }
 
       // Locked + steady → warp the card flat and embed.
-      scanBlocked.value = true;
-      stableCount.value = 0;
+      recognizing.value = true;   // background embed in flight — gates re-capture, NOT tracking
       setReading(true);
       if (readingTimer.current) clearTimeout(readingTimer.current);
       readingTimer.current = setTimeout(() => { if (mounted.current) setReading(false); }, 900);
@@ -1192,7 +1249,7 @@ export default function CameraView({
       if (captureNext.value) return;                       // already waiting for the grab
       const corners: number[][] = [[cs[0], cs[1]], [cs[2], cs[3]], [cs[4], cs[5]], [cs[6], cs[7]]];
       if (collectModeRef.current) lastCorners.current = peakAvg >= 0.20 ? corners : null;
-      if (peakAvg < 0.20) { emaValid.current = false; onNoCard(); return; }
+      if (peakAvg < CARD_PRESENCE_MIN) { onNoCard(); return; } // no real card → hide (onNoCard coasts ≤2 frames then resets)
 
       const sq = Math.min(fw, fh);
       const cropX = (fw - sq) / 2, cropY = (fh - sq) / 2;
@@ -1203,7 +1260,7 @@ export default function CameraView({
       const aspect = Math.min(qw, qh) / Math.max(qw, qh);
       const areaFrac = (qw * qh) / (sq * sq);
       if (aspect < 0.5 || aspect > 0.88 || areaFrac < 0.12 || areaFrac > 1.25) {
-        stableCount.value = 0; emaValid.current = false; onNoCard(); return;
+        stableCount.value = 0; onNoCard(); return; // implausible quad → coast (filter stays warm)
       }
       missCount.current = 0; // valid card → clear the no-card hysteresis
       if (firstSeenRef.current === 0) firstSeenRef.current = Date.now(); // S0 HUD: e2e timer start
@@ -1214,17 +1271,9 @@ export default function CameraView({
         x: p.x * mscale - (fw * mscale - VW) / 2,
         y: p.y * mscale - (fh * mscale - VH) / 2,
       });
-      const A = 0.5;
-      if (!emaValid.current || emaPts.current.length !== 4) {
-        emaPts.current = fpt.map((p) => ({ x: p.x, y: p.y }));
-        emaValid.current = true;
-      } else {
-        for (let i = 0; i < 4; i++) {
-          emaPts.current[i].x += A * (fpt[i].x - emaPts.current[i].x);
-          emaPts.current[i].y += A * (fpt[i].y - emaPts.current[i].y);
-        }
-      }
-      const spt = emaPts.current;
+      // S2 — adaptive One-Euro smoothing on the 4 corners (steady still, tight moving).
+      const _oe = oneEuro8([fpt[0].x, fpt[0].y, fpt[1].x, fpt[1].y, fpt[2].x, fpt[2].y, fpt[3].x, fpt[3].y]);
+      const spt = [{ x: _oe[0], y: _oe[1] }, { x: _oe[2], y: _oe[3] }, { x: _oe[4], y: _oe[5] }, { x: _oe[6], y: _oe[7] }];
       const p0 = mp(spt[0]), p1 = mp(spt[1]), p2 = mp(spt[2]), p3 = mp(spt[3]);
       const cx = (p0.x + p1.x + p2.x + p3.x) / 4, cy = (p0.y + p1.y + p2.y + p3.y) / 4;
       const sw = (dd(p0, p1) + dd(p2, p3)) / 2, sh = (dd(p1, p2) + dd(p3, p0)) / 2;
@@ -1237,12 +1286,11 @@ export default function CameraView({
       const qcy = (fpt[0].y + fpt[1].y + fpt[2].y + fpt[3].y) / 4;
       const moved = Math.abs(qcx - lastQuadCx.current) + Math.abs(qcy - lastQuadCy.current);
       lastQuadCx.current = qcx; lastQuadCy.current = qcy;
-      stableCount.value = moved < sq * 0.04 ? stableCount.value + 1 : 1;
+      stableCount.value = moved < sq * 0.055 ? stableCount.value + 1 : 1;
       const fState = stableCount.value >= STABLE_FRAMES_NEEDED ? 2 : 1;
-      springTo(
-        cx - viewSize.current.w / 2, cy - viewSize.current.h / 2,
-        Math.max(0.2, Math.min(2.4, sw / BOX_W)), Math.max(0.2, Math.min(2.4, sh / BOX_H)), ang,
-      );
+      // S3 interim — draw the true perspective quad through the 4 smoothed corners
+      // (green when LOCKED, amber while still settling). Replaces the rotated box.
+      quadRef.current?.set([p0, p1, p2, p3], fState === 2 ? '#10b981' : '#f59e0b');
       if (fState !== lastAlign.current) { lastAlign.current = fState; setAlignState(fState as 0 | 1 | 2); }
       if (fState === 2 && !lockRecordedRef.current) {      // S0 HUD: e2e lock ms (corners → LOCKED)
         lockRecordedRef.current = true;
@@ -1250,13 +1298,24 @@ export default function CameraView({
       }
 
       if (collectModeRef.current) return;                  // collect: box only, shutter grabs
-      if (stableCount.value < STABLE_FRAMES_NEEDED) return;
-      if (!embedReady.value) return;                       // don't lock until SigLIP/matcher loaded (no "not initialised")
-      captureNext.value = true;                            // locked → worklet delivers pixels next tick
+      if (!embedReady.value) return;                       // model not loaded yet
+      // ManaBox-style continuous flow: recognition runs in the BACKGROUND and never freezes
+      // the box. Grab a frame whenever the box is locked and no embed is in flight / cooling —
+      // NO "hold still" gate (a loose/blurry grab just fails the confidence check and we retry
+      // on the next frame). Skip only fast motion (that frame would be motion-blurred).
+      // Grab exactly ONE still frame per hold and identify it in the BACKGROUND — no continuous
+      // real-time embedding (that was the lag + the "identifying…" flicker). But only after a
+      // GENUINE settle: the box must actually reach LOCKED (fState 2 = several steady frames),
+      // NOT a momentary dip while a card is being placed onto a stack — that transitional crop
+      // was the misread source. Moving drops it out of LOCKED → re-arm; settling fires one grab.
+      if (fState < 2) { captureArmed.current = true; return; } // still settling/moving → (re)arm
+      if (!captureArmed.current || recognizing.value || Date.now() < captureCooldownUntil.current) return;
+      captureArmed.current = false;                        // consume the arm → exactly one grab per settle
+      captureNext.value = true;                            // grab one frame's pixels → onGrabbedFrame (background)
     } finally {
       liveBusy.value = false;
     }
-  }, [scanBlocked, captureNext, onNoCard, springTo, stableCount, liveBusy]);
+  }, [scanBlocked, recognizing, captureNext, onNoCard, springTo, stableCount, liveBusy]);
 
   // One-shot heavy path: the worklet marshals the frame's pixels exactly once (on lock,
   // or on a collect shutter). Warp → embed → match → add — same as onCornerFrame's tail.
@@ -1270,8 +1329,7 @@ export default function CameraView({
         await saveCollectFrame();
         return;
       }
-      scanBlocked.value = true;
-      stableCount.value = 0;
+      recognizing.value = true;   // background embed in flight — gates re-capture, NOT tracking
       setReading(true);
       if (readingTimer.current) clearTimeout(readingTimer.current);
       readingTimer.current = setTimeout(() => { if (mounted.current) setReading(false); }, 900);
@@ -1326,23 +1384,24 @@ export default function CameraView({
       console.log(`[quick-tf] emb=${embMs}ms match=${matchMs}ms peak=${peakAvg.toFixed(2)} rot=${orient} → ${top ? `${top.name} ${top.set} (${conf.toFixed(3)} ${sameN}/${matches.length} t${temporalN})` : 'none'} ${accepted ? 'ACCEPT' : 'reject'}`);
 
       if (!accepted) {
-        const now = Date.now();
-        if (rejectSince.current === 0) rejectSince.current = now;
-        if (now - rejectSince.current >= AI_ESCALATE_MS) {
-          rejectSince.current = 0;
-          showNotif({ type: 'error', text: 'No match', sub: 'realign & retry' });
-          resetScanner(900);
-          return;
-        }
-        resetScanner(250);
+        // ManaBox-style: no "hold still" nag, no reset — keep the box tracking the card and
+        // silently retry on the next good frame after a short beat (throttles the CPU-heavy
+        // embed so tracking stays responsive during the retries).
+        captureCooldownUntil.current = Date.now() + 450;
         return;
       }
       rejectSince.current = 0;
+      captureCooldownUntil.current = Date.now() + SCAN_COOLDOWN_MS; // pause re-scan after a hit
       hudEmbRef.current = embMs; hudMatchRef.current = matchMs; // S0 HUD: embed/match confirm ms
       if (firstSeenRef.current) hudIdRef.current = Date.now() - firstSeenRef.current; // S0 HUD: e2e ID ms
-      firstSeenRef.current = 0; lockRecordedRef.current = false; // reset e2e timers per-card (even in back-to-back scans)
+      firstSeenRef.current = 0; lockRecordedRef.current = false; // reset e2e timers per-card
+      // Continuous scanning would otherwise re-add the very card still in your hand. Skip if
+      // it's the one we just added; the guard clears when the card leaves the frame (onNoCard),
+      // so re-presenting it — or moving to the next card — adds normally. ManaBox-style.
+      if (quickMode && top.id === lastAddedId.current) return;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       if (quickMode) {
+        lastAddedId.current = top.id;
         await doAdd({ scryfall_id: top.id, card_name: top.name }, false, currentDeck);
         showNotif({
           type: currentDeck ? 'success' : 'warn',
@@ -1350,7 +1409,8 @@ export default function CameraView({
           sub: currentDeck ? `→ ${currentDeck.name}` : '→ Library',
           engine: 'embed',
         });
-        resetScanner(SCAN_COOLDOWN_MS);
+        // Keep tracking the card (green quad stays hugging it) — no reset/hide. The cooldown
+        // + lastAddedId guard prevent a double-add; moving to the next card scans it.
       } else {
         setResult({
           scryfall_id: top.id, card_name: top.name, _engine: 'embed',
@@ -1366,9 +1426,11 @@ export default function CameraView({
     } catch (e) {
       console.log('[quick-tf-error]', String(e));
     } finally {
+      recognizing.value = false;  // embed done → capture can re-arm (gated by captureCooldownUntil)
+      setReading(false);
       liveBusy.value = false;
     }
-  }, [quickMode, currentDeck, doAdd, showNotif, resetScanner, scanBlocked, stableCount, saveCollectFrame, liveBusy]);
+  }, [quickMode, currentDeck, doAdd, showNotif, resetScanner, recognizing, saveCollectFrame, liveBusy]);
 
   // Toggle collect-mode; reset any in-flight scan/lock so the switch is clean both ways.
   const toggleCollect = useCallback(() => {
@@ -1620,7 +1682,8 @@ export default function CameraView({
       // (onCornerResult → box); pixels go over once, on lock/collect (onGrabbedFrame).
       if (!LIVE_AUTOSCAN || !tfReady.value || scanBlocked.value || tfModel == null) return;
       const model = tfModel;
-      runAtTargetFps(TFLITE_FPS, () => {
+      // Adaptive rate: crawl when no card in view, ramp up while tracking one (heat/perf).
+      runAtTargetFps(cardActiveSV.value ? DETECT_FPS_ACTIVE : DETECT_FPS_IDLE, () => {
         'worklet';
         try {
           const _t0 = performance.now(); // S0 HUD: full callback budget
@@ -1665,6 +1728,7 @@ export default function CameraView({
             peakSum += mv;
           }
           const peakAvg = peakSum / 4;
+          cardActiveSV.value = peakAvg >= CARD_PRESENCE_MIN; // drives the adaptive detector rate
           const _tD = performance.now();
           hudDecodeMs.value = _tD - _tI;           // S0 HUD: heatmap decode ms
           hudWlMs.value = _tD - _t0;               // S0 HUD: whole callback budget
@@ -1678,7 +1742,7 @@ export default function CameraView({
             onGrabbedFrame(arr, cs, peakAvg, frame.height, frame.width, forCollect);
             return; // liveBusy released by onGrabbedFrame
           }
-          if (peakAvg < 0.20) { onNoCard(); liveBusy.value = false; return; }
+          if (peakAvg < CARD_PRESENCE_MIN) { onNoCard(); liveBusy.value = false; return; }
           onCornerResult(cs, peakAvg, frame.height, frame.width);
         } catch (e) {
           liveBusy.value = false;
@@ -1707,7 +1771,7 @@ export default function CameraView({
       liveBusy.value = false;
       if (!fpErrReported.value) { fpErrReported.value = true; onFpError(String(e)); }
     }
-  }, [tfModel, tfReady, embedReady, scanBlocked, liveBusy, frameTick, resize, captureNext, collectGrab, fpReported, reportFp, fpErrReported, onFpError, onCornerFrame, onCornerResult, onGrabbedFrame, hudDetMs, hudWlMs, hudDetCount, hudResizeMs, hudNormMs, hudDecodeMs]);
+  }, [tfModel, tfReady, embedReady, scanBlocked, liveBusy, frameTick, resize, captureNext, collectGrab, fpReported, reportFp, fpErrReported, onFpError, onCornerFrame, onCornerResult, onGrabbedFrame, hudDetMs, hudWlMs, hudDetCount, hudResizeMs, hudNormMs, hudDecodeMs, cardActiveSV]);
 
   // ── Permission / device guards ─────────────────────────────────────────────
 
@@ -1829,31 +1893,22 @@ export default function CameraView({
         </View>
       )}
 
-      {/* ── Lock-on tracking box ────────────────────────────────────────── */}
-      {!result && (
+      {/* ── Resting viewfinder guide (only while SEARCHING; the perspective quad
+             takes over the moment a card is detected) ──────────────────────── */}
+      {!result && alignState === 0 && (
         <View pointerEvents="none" style={S.vfWrap}>
-          <Animated.View style={[
-            S.trackBox,
-            {
-              borderColor: hudColor,
-              opacity: alignState === 0 ? 0.55 : 1,
-              transform: [
-                { translateX: trackTX },
-                { translateY: trackTY },
-                { rotate: trackRot.interpolate({ inputRange: [-360, 360], outputRange: ['-360deg', '360deg'] }) },
-                { scaleX: trackSX },
-                { scaleY: trackSY },
-              ],
-            },
-          ]}>
-            {/* Corner accents for the lock-on look */}
+          <View style={[S.trackBox, { borderColor: hudColor, opacity: 0.55 }]}>
             <View style={[S.corner, S.cornerTL, { borderColor: hudColor }]} />
             <View style={[S.corner, S.cornerTR, { borderColor: hudColor }]} />
             <View style={[S.corner, S.cornerBR, { borderColor: hudColor }]} />
             <View style={[S.corner, S.cornerBL, { borderColor: hudColor }]} />
-          </Animated.View>
+          </View>
         </View>
       )}
+
+      {/* ── S3 interim — true perspective-quad lock-on (hugs the card at any
+             angle). Renders itself imperatively via quadRef. ─────────────────── */}
+      {!result && <QuadOverlay ref={quadRef} />}
 
       {/* Hint text — fixed position, does not move with the lock-on box */}
       {!result && (
@@ -1865,11 +1920,9 @@ export default function CameraView({
               : escalateMsg ? escalateMsg
               : resolving ? '⚡ Saving…'
               : manualScanning ? '⚡ Reading card…'
-              : reading ? '🔍 Reading card… hold steady'
-              : alignState === 2 ? '🎯 Locked on — hold steady'
-              : alignState === 1 ? '🔎 Card detected — hold still'
-              : SERVER_MATCH ? '🃏 Fill the box with the card, then tap Embed scan'
-              : '📷 Point at a card — it locks on automatically'}
+              : reading ? '🔍 Identifying…'
+              : alignState >= 1 ? '🎯 Tracking card…'
+              : '📷 Point at a card'}
           </Text>
         </View>
       )}
@@ -1884,7 +1937,7 @@ export default function CameraView({
           </Text>
           <Text style={S.diagHint}>
             {ONDEVICE_MATCH ? embedStatus
-              : liveDist != null ? `last match dist=${liveDist} (lower=better, ≤${AUTO_MAX_DIST} adds)` : 'hold a card steady in the box'}
+              : liveDist != null ? `last match dist=${liveDist} (lower=better, ≤${AUTO_MAX_DIST} adds)` : 'point at a card'}
           </Text>
         </View>
       )}
