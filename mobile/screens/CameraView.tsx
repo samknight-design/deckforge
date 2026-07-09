@@ -63,7 +63,7 @@ import QuadOverlay, { type QuadHandle } from '../components/QuadOverlay';
 
 // Bump this string whenever the scanner changes — it's shown on screen so we can
 // confirm which build is actually running on the device (no more guessing).
-const BUILD_TAG = 'corner-v3-persp';
+const BUILD_TAG = 'v3-SERVER';
 
 // S1.2 — delegate table (§2.5.3). Preference order per platform; index 0 is the
 // production lead, later entries are fallbacks. On Android we lead with the GPU
@@ -146,7 +146,12 @@ const DUMP_LIVE = false;
 // Takes priority over SERVER_MATCH when true.
 const ONDEVICE_MATCH = true;
 const SERVER_MATCH = true;
-const MATCH_SERVER_URL = 'http://localhost:8765/match';
+const MATCH_SERVER_URL = 'http://127.0.0.1:8765/match'; // 127.0.0.1 (phone can't resolve "localhost")
+// SERVER_LIVE — route the LIVE auto-scan recognition to the desktop match server
+// (adb reverse tcp:8765) instead of the on-device SigLIP. Test the server-side option:
+// the phone only detects+warps and sends the crop, so the ~450MB models never load on
+// the phone (no swap thrash) and the ~700ms embed never cooks it. Flip false → on-device.
+const SERVER_LIVE = true;
 // Embedding cosine confidence gate. Measured on real captures: correct matches
 // ≥0.73, wrong matches ~0.63. Accept ≥ this, else ask for a realign+retry — so a
 // bad/loose capture fails LOUD instead of adding the wrong card. Tune with data.
@@ -207,6 +212,27 @@ function bytesToBase64(bytes: Uint8Array): string {
   if (rem === 1) { const n = bytes[i] << 16; out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + '=='; }
   else if (rem === 2) { const n = (bytes[i] << 16) | (bytes[i + 1] << 8); out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + chars[(n >> 6) & 63] + '='; }
   return out;
+}
+
+// SERVER_LIVE — recognize a 256×256 RGBA colour crop on the desktop match server instead
+// of on-device. Encodes → JPEG → base64 → POST /match. Returns the SAME shape the on-device
+// embedAndMatch returns ({matches:[{id,name,set,cn,score}], embMs, matchMs}) so onGrabbedFrame's
+// accept/consensus/add logic is unchanged. The heavy SigLIP + 115k match runs on the server.
+type LiveMatch = { id: string; name: string; set: string; cn: string; score: number };
+async function serverMatchRgba(rgba: Uint8Array, size = 256): Promise<{ matches: LiveMatch[]; embMs: number; matchMs: number }> {
+  const g = global as any;
+  if (typeof g.Buffer === 'undefined') g.Buffer = require('buffer').Buffer;
+  const jpeg = await import('jpeg-js');
+  const enc = (jpeg as any).encode({ data: rgba, width: size, height: size }, 80);
+  const imgB64 = bytesToBase64(enc.data as Uint8Array);
+  const t0 = Date.now();
+  const res = await fetch(MATCH_SERVER_URL, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image_b64: imgB64 }),
+  });
+  const rtt = Date.now() - t0;
+  const data = await res.json().catch(() => ({} as any));
+  return { matches: (data?.matches ?? []) as LiveMatch[], embMs: data?.ms ?? rtt, matchMs: rtt };
 }
 
 // ── Worklet helpers ───────────────────────────────────────────────────────────
@@ -715,6 +741,17 @@ export default function CameraView({
 
   // Warm up the on-device embedding model + index (loads ~280MB; takes a few sec).
   useEffect(() => {
+    if (SERVER_LIVE) {
+      // Server-side recognition: DON'T load the on-device SigLIP (~450MB) at all — that's the
+      // whole point of the test (keep the phone light). Mark ready so captures proceed; the
+      // desktop match server does the recognition. Ping /health so the status reflects reality.
+      embedReady.value = true;
+      fetch(MATCH_SERVER_URL.replace('/match', '/health'))
+        .then(r => r.json())
+        .then(d => { if (mounted.current) setEmbedStatus(`server ✓ ${d?.cards ?? '?'} cards`); })
+        .catch(() => { if (mounted.current) setEmbedStatus('server: unreachable (adb reverse 8765?)'); });
+      return;
+    }
     if (!ONDEVICE_MATCH) return;
     import('../lib/embedScan')
       .then(m => m.initEmbedScan(s => { if (mounted.current) setEmbedStatus(s); }))
@@ -1336,7 +1373,9 @@ export default function CameraView({
 
       const { warpQuadColor } = await import('../lib/scanOpenCV');
       const rgba = warpQuadColor(rgb, 256, 3, corners, 256);
-      const { embedAndMatch } = await import('../lib/embedScan');
+      // Recognition: server-side (SERVER_LIVE) or on-device SigLIP. Same return shape either way.
+      const embedAndMatch = SERVER_LIVE ? null : (await import('../lib/embedScan')).embedAndMatch;
+      const doMatch = (r: Uint8Array) => SERVER_LIVE ? serverMatchRgba(r, 256) : embedAndMatch!(r, 256);
       // Accept on absolute confidence OR same-name consensus in the top-K (reprints).
       const ok = (ms: Array<{ name: string; score: number }>): boolean => {
         const t = ms[0];
@@ -1346,7 +1385,7 @@ export default function CameraView({
         return ms.filter((m) => m.name === t.name).length >= 3; // strong same-name consensus (≥3 of top-K)
       };
 
-      let { matches, embMs, matchMs } = await embedAndMatch(rgba, 256);
+      let { matches, embMs, matchMs } = await doMatch(rgba);
       let orient = 0;
       // Only pay for the 180° retry if the upright pass didn't already accept (handles
       // physically-rotated cards). Accepting on consensus here also skips the retry for
@@ -1358,7 +1397,7 @@ export default function CameraView({
           const s = (N - 1 - p) * 4, d = p * 4;
           rgba180[d] = rgba[s]; rgba180[d + 1] = rgba[s + 1]; rgba180[d + 2] = rgba[s + 2]; rgba180[d + 3] = 255;
         }
-        const r2 = await embedAndMatch(rgba180, 256);
+        const r2 = await doMatch(rgba180);
         if (ok(r2.matches) || (r2.matches[0]?.score ?? 0) > (matches[0]?.score ?? 0)) {
           matches = r2.matches; orient = 180;
           embMs += r2.embMs; matchMs += r2.matchMs;
