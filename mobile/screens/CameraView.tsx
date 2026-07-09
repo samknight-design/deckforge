@@ -146,7 +146,11 @@ const DUMP_LIVE = false;
 // Takes priority over SERVER_MATCH when true.
 const ONDEVICE_MATCH = true;
 const SERVER_MATCH = true;
-const MATCH_SERVER_URL = 'http://127.0.0.1:8765/match'; // 127.0.0.1 (phone can't resolve "localhost")
+// Match-server URL. Default = loopback via `adb reverse tcp:8765` (cable, reliable).
+// For untethered real-internet testing: run `scanner-spike/cloudflared.exe tunnel --url
+// http://localhost:8765`, grab the https://….trycloudflare.com URL, and paste it here
+// (it changes each tunnel restart). Later: the permanent hosted URL.
+const MATCH_SERVER_URL = 'http://127.0.0.1:8765/match';
 // SERVER_LIVE — route the LIVE auto-scan recognition to the desktop match server
 // (adb reverse tcp:8765) instead of the on-device SigLIP. Test the server-side option:
 // the phone only detects+warps and sends the crop, so the ~450MB models never load on
